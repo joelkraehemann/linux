@@ -50,11 +50,11 @@ static bool debug;
 module_param(debug, bool, 0444);
 MODULE_PARM_DESC(debug, "print a lot of debug information");
 
-#define spi_hid_dbg(shid, fmt, arg...)					  \
-do {									  \
-	if (debug)							  \
-		dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
-} while (0)
+#define spi_hid_dbg(shid, fmt, arg...)					\
+	do {								\
+		if (debug)						\
+			dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
+	} while (0)
 
 struct spi_hid_desc {
 	__le16 wHIDDescLength;
@@ -89,18 +89,18 @@ union command {
 	} __packed c;
 };
 
-#define SPI_HID_CMD(opcode_) \
-	.opcode = opcode_, .length = 4, \
-	.registerIndex = offsetof(struct spi_hid_desc, wCommandRegister)
+#define SPI_HID_CMD(opcode_)						\
+	.opcode = opcode_, .length = 4,					\
+		.registerIndex = offsetof(struct spi_hid_desc, wCommandRegister)
 
 /* fetch HID descriptor */
 static const struct spi_hid_cmd hid_descr_cmd = { .length = 2 };
 /* fetch report descriptors */
 static const struct spi_hid_cmd hid_report_descr_cmd = {
-		.registerIndex = offsetof(struct spi_hid_desc,
-			wReportDescRegister),
-		.opcode = 0x00,
-		.length = 2 };
+	.registerIndex = offsetof(struct spi_hid_desc,
+				  wReportDescRegister),
+	.opcode = 0x00,
+	.length = 2 };
 /* commands */
 static const struct spi_hid_cmd hid_reset_cmd =		{ SPI_HID_CMD(0x01),
 							  .wait = true };
@@ -152,9 +152,9 @@ struct spi_hid {
 };
 
 static int __spi_hid_command(struct spi_device *spi,
-		const struct spi_hid_cmd *command, u8 reportID,
-		u8 reportType, u8 *args, int args_len,
-		unsigned char *buf_recv, int data_len)
+			     const struct spi_hid_cmd *command, u8 reportID,
+			     u8 reportType, u8 *args, int args_len,
+			     unsigned char *buf_recv, int data_len)
 {
 	struct spi_hid *shid = spi_get_drvdata(client);
 	union command *cmd = (union command *)shid->cmdbuf;
@@ -212,8 +212,8 @@ static int __spi_hid_command(struct spi_device *spi,
 	if (wait) {
 		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
 		if (!wait_event_timeout(shid->wait,
-				!test_bit(SPI_HID_RESET_PENDING, &shid->flags),
-				msecs_to_jiffies(5000)))
+					!test_bit(SPI_HID_RESET_PENDING, &shid->flags),
+					msecs_to_jiffies(5000)))
 			ret = -ENODATA;
 		spi_hid_dbg(shid, "%s: finished.\n", __func__);
 	}
@@ -249,7 +249,7 @@ static int spi_hid_get_report(struct spi_device *spi, u8 reportType,
 	args[args_len++] = readRegister >> 8;
 
 	ret = __spi_hid_command(spi, &hid_get_report_cmd, reportID,
-		reportType, args, args_len, buf_recv, data_len);
+				reportType, args, args_len, buf_recv, data_len);
 	if (ret) {
 		dev_err(&spi->dev,
 			"failed to retrieve report from device.\n");
@@ -343,7 +343,7 @@ static int i2c_hid_set_power(struct i2c_client *client, int power_state)
 	i2c_hid_dbg(shid, "%s\n", __func__);
 
 	ret = __i2c_hid_command(client, &hid_set_power_cmd, power_state,
-		0, NULL, 0, NULL, 0);
+				0, NULL, 0, NULL, 0);
 	if (ret)
 		dev_err(&client->dev, "failed to change power setting.\n");
 
@@ -376,7 +376,7 @@ static int spi_hid_hwreset(struct spi_device *spi)
 		spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
 	}
 
-out_unlock:
+ out_unlock:
 	mutex_unlock(&shid->reset_lock);
 	return ret;
 }
@@ -418,11 +418,119 @@ static void spi_hid_get_input(struct spi_hid *shid)
 
 	if (test_bit(SPI_HID_STARTED, &shid->flags))
 		hid_input_report(shid->hid, HID_INPUT_REPORT, shid->inbuf + 2,
-				ret_size - 2, 1);
+				 ret_size - 2, 1);
 
 	return;
 }
 
+static irqreturn_t spi_hid_irq(int irq, void *dev_id)
+{
+	struct spi_hid *shid = dev_id;
+
+	if (test_bit(SPI_HID_READ_PENDING, &shid->flags))
+		return IRQ_HANDLED;
+
+	spi_hid_get_input(shid);
+
+	return IRQ_HANDLED;
+}
+
+static int spi_hid_get_report_length(struct hid_report *report)
+{
+	return ((report->size - 1) >> 3) + 1 +
+		report->device->report_enum[report->type].numbered + 2;
+}
+
+static void spi_hid_init_report(struct hid_report *report, u8 *buffer,
+				size_t bufsize)
+{
+	struct hid_device *hid = report->device;
+	struct i2c_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	unsigned int size, ret_size;
+
+	size = spi_hid_get_report_length(report);
+	if (spi_hid_get_report(spi,
+			       report->type == HID_FEATURE_REPORT ? 0x03 : 0x01,
+			       report->id, buffer, size))
+		return;
+
+	spi_hid_dbg(shid, "report (len=%d): %*ph\n", size, size, buffer);
+
+	ret_size = buffer[0] | (buffer[1] << 8);
+
+	if (ret_size != size) {
+		dev_err(&spi->dev, "error in %s size:%d / ret_size:%d\n",
+			__func__, size, ret_size);
+		return;
+	}
+
+	/* hid->driver_lock is held as we are in probe function,
+	 * we just need to setup the input fields, so using
+	 * hid_report_raw_event is safe. */
+	hid_report_raw_event(hid, report->type, buffer + 2, size - 2, 1);
+}
+
+/*
+ * Initialize all reports
+ */
+static void spi_hid_init_reports(struct hid_device *hid)
+{
+	struct hid_report *report;
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	u8 *inbuf = kzalloc(shid->bufsize, GFP_KERNEL);
+
+	if (!inbuf) {
+		dev_err(&spi->dev, "can not retrieve initial reports\n");
+		return;
+	}
+
+	/*
+	 * The device must be powered on while we fetch initial reports
+	 * from it.
+	 */
+	pm_runtime_get_sync(&spi->dev);
+
+	list_for_each_entry(report,
+			    &hid->report_enum[HID_FEATURE_REPORT].report_list, list)
+		spi_hid_init_report(report, inbuf, shid->bufsize);
+
+	pm_runtime_put(&spi->dev);
+
+	kfree(inbuf);
+}
+
+/*
+ * Traverse the supplied list of reports and find the longest
+ */
+static void spi_hid_find_max_report(struct hid_device *hid, unsigned int type,
+				    unsigned int *max)
+{
+	struct hid_report *report;
+	unsigned int size;
+
+	/* We should not rely on wMaxInputLength, as some devices may set it to
+	 * a wrong length. */
+	list_for_each_entry(report, &hid->report_enum[type].report_list, list) {
+		size = spi_hid_get_report_length(report);
+		if (*max < size)
+			*max = size;
+	}
+}
+
+static void spi_hid_free_buffers(struct spi_hid *shid)
+{
+	kfree(shid->inbuf);
+	kfree(shid->rawbuf);
+	kfree(shid->argsbuf);
+	kfree(shid->cmdbuf);
+	shid->inbuf = NULL;
+	shid->rawbuf = NULL;
+	shid->cmdbuf = NULL;
+	shid->argsbuf = NULL;
+	shid->bufsize = 0;
+}
 
 
 module_spi_driver(spi_hid_driver);
