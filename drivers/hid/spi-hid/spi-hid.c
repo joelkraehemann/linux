@@ -156,7 +156,7 @@ static int __spi_hid_command(struct spi_device *spi,
 			     u8 reportType, u8 *args, int args_len,
 			     unsigned char *buf_recv, int data_len)
 {
-	struct spi_hid *shid = spi_get_drvdata(client);
+	struct spi_hid *shid = spi_get_drvdata(spi);
 	union command *cmd = (union command *)shid->cmdbuf;
 	struct spi_transfer t[2];
 	int num_xfers = 1;
@@ -335,17 +335,17 @@ static int spi_hid_set_or_send_report(struct spi_device *spi, u8 reportType,
 }
 
 
-static int i2c_hid_set_power(struct i2c_client *client, int power_state)
+static int spi_hid_set_power(struct spi_device *spi, int power_state)
 {
-	struct i2c_hid *shid = i2c_get_clientdata(client);
+	struct spi_hid *shid = spi_get_drvdata(spi);
 	int ret;
 
-	i2c_hid_dbg(shid, "%s\n", __func__);
+	spi_hid_dbg(shid, "%s\n", __func__);
 
-	ret = __i2c_hid_command(client, &hid_set_power_cmd, power_state,
+	ret = __spi_hid_command(spi, &hid_set_power_cmd, power_state,
 				0, NULL, 0, NULL, 0);
 	if (ret)
-		dev_err(&client->dev, "failed to change power setting.\n");
+		dev_err(&spi->dev, "failed to change power setting.\n");
 
 	return ret;
 }
@@ -445,7 +445,7 @@ static void spi_hid_init_report(struct hid_report *report, u8 *buffer,
 				size_t bufsize)
 {
 	struct hid_device *hid = report->device;
-	struct i2c_device *spi = hid->driver_data;
+	struct spi_device *spi = hid->driver_data;
 	struct spi_hid *shid = spi_get_drvdata(spi);
 	unsigned int size, ret_size;
 
@@ -530,6 +530,225 @@ static void spi_hid_free_buffers(struct spi_hid *shid)
 	shid->cmdbuf = NULL;
 	shid->argsbuf = NULL;
 	shid->bufsize = 0;
+}
+
+static int spi_hid_alloc_buffers(struct spi_hid *shid, size_t report_size)
+{
+	/* the worst case is computed from the set_report command with a
+	 * reportID > 15 and the maximum report length */
+	int args_len = sizeof(__u8) + /* optional ReportID byte */
+		sizeof(__u16) + /* data register */
+		sizeof(__u16) + /* size of the report */
+		report_size; /* report */
+
+	shid->inbuf = kzalloc(report_size, GFP_KERNEL);
+	shid->rawbuf = kzalloc(report_size, GFP_KERNEL);
+	shid->argsbuf = kzalloc(args_len, GFP_KERNEL);
+	shid->cmdbuf = kzalloc(sizeof(union command) + args_len, GFP_KERNEL);
+
+	if (!shid->inbuf || !shid->rawbuf || !shid->argsbuf || !shid->cmdbuf) {
+		spi_hid_free_buffers(shid);
+		return -ENOMEM;
+	}
+
+	shid->bufsize = report_size;
+
+	return 0;
+}
+
+static int spi_hid_get_raw_report(struct hid_device *hid,
+				  unsigned char report_number, __u8 *buf, size_t count,
+				  unsigned char report_type)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	size_t ret_count, ask_count;
+	int ret;
+
+	if (report_type == HID_OUTPUT_REPORT)
+		return -EINVAL;
+
+	/* +2 bytes to include the size of the reply in the query buffer */
+	ask_count = min(count + 2, (size_t)shid->bufsize);
+
+	ret = spi_hid_get_report(spi,
+				 report_type == HID_FEATURE_REPORT ? 0x03 : 0x01,
+				 report_number, shid->rawbuf, ask_count);
+
+	if (ret < 0)
+		return ret;
+
+	ret_count = shid->rawbuf[0] | (shid->rawbuf[1] << 8);
+
+	if (ret_count <= 2)
+		return 0;
+
+	ret_count = min(ret_count, ask_count);
+
+	/* The query buffer contains the size, dropping it in the reply */
+	count = min(count, ret_count - 2);
+	memcpy(buf, shid->rawbuf + 2, count);
+
+	return count;
+}
+
+static int spi_hid_output_raw_report(struct hid_device *hid, __u8 *buf,
+				     size_t count, unsigned char report_type, bool use_data)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	int report_id = buf[0];
+	int ret;
+
+	if (report_type == HID_INPUT_REPORT)
+		return -EINVAL;
+
+	mutex_lock(&shid->reset_lock);
+
+	if (report_id) {
+		buf++;
+		count--;
+	}
+
+	ret = spi_hid_set_or_send_report(spi,
+					 report_type == HID_FEATURE_REPORT ? 0x03 : 0x02,
+					 report_id, buf, count, use_data);
+
+	if (report_id && ret >= 0)
+		ret++; /* add report_id to the number of transfered bytes */
+
+	mutex_unlock(&shid->reset_lock);
+
+	return ret;
+}
+
+static int spi_hid_output_report(struct hid_device *hid, __u8 *buf,
+				 size_t count)
+{
+	return spi_hid_output_raw_report(hid, buf, count, HID_OUTPUT_REPORT,
+					 false);
+}
+
+static int spi_hid_raw_request(struct hid_device *hid, unsigned char reportnum,
+			       __u8 *buf, size_t len, unsigned char rtype,
+			       int reqtype)
+{
+	switch (reqtype) {
+	case HID_REQ_GET_REPORT:
+		return spi_hid_get_raw_report(hid, reportnum, buf, len, rtype);
+	case HID_REQ_SET_REPORT:
+		if (buf[0] != reportnum)
+			return -EINVAL;
+		return spi_hid_output_raw_report(hid, buf, len, rtype, true);
+	default:
+		return -EIO;
+	}
+}
+
+static int spi_hid_parse(struct hid_device *hid)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_desc *hdesc = &shid->hdesc;
+	unsigned int rsize;
+	char *rdesc;
+	int ret;
+	int tries = 3;
+
+	spi_hid_dbg(shid, "entering %s\n", __func__);
+
+	rsize = le16_to_cpu(hdesc->wReportDescLength);
+	if (!rsize || rsize > HID_MAX_DESCRIPTOR_SIZE) {
+		dbg_hid("weird size of report descriptor (%u)\n", rsize);
+		return -EINVAL;
+	}
+
+	do {
+		ret = spi_hid_hwreset(spi);
+		if (ret)
+			msleep(1000);
+	} while (tries-- > 0 && ret);
+
+	if (ret)
+		return ret;
+
+	rdesc = kzalloc(rsize, GFP_KERNEL);
+
+	if (!rdesc) {
+		dbg_hid("couldn't allocate rdesc memory\n");
+		return -ENOMEM;
+	}
+
+	spi_hid_dbg(shid, "asking HID report descriptor\n");
+
+	ret = spi_hid_command(spi, &hid_report_descr_cmd, rdesc, rsize);
+	if (ret) {
+		hid_err(hid, "reading report descriptor failed\n");
+		kfree(rdesc);
+		return -EIO;
+	}
+
+	spi_hid_dbg(shid, "Report Descriptor: %*ph\n", rsize, rdesc);
+
+	ret = hid_parse_report(hid, rdesc, rsize);
+	kfree(rdesc);
+	if (ret) {
+		dbg_hid("parsing report descriptor failed\n");
+		return ret;
+	}
+
+	return 0;
+}
+
+static int spi_hid_start(struct hid_device *hid)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	int ret;
+	unsigned int bufsize = HID_MIN_BUFFER_SIZE;
+
+	spi_hid_find_max_report(hid, HID_INPUT_REPORT, &bufsize);
+	spi_hid_find_max_report(hid, HID_OUTPUT_REPORT, &bufsize);
+	spi_hid_find_max_report(hid, HID_FEATURE_REPORT, &bufsize);
+
+	if (bufsize > shid->bufsize) {
+		spi_hid_free_buffers(shid);
+
+		ret = spi_hid_alloc_buffers(shid, bufsize);
+
+		if (ret)
+			return ret;
+	}
+
+	if (!(hid->quirks & HID_QUIRK_NO_INIT_REPORTS))
+		spi_hid_init_reports(hid);
+
+	return 0;
+}
+
+static void spi_hid_stop(struct hid_device *hid)
+{
+	hid->claimed = 0;
+}
+
+static int spi_hid_open(struct hid_device *hid)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	int ret = 0;
+
+	mutex_lock(&spi_hid_open_mut);
+	if (!hid->open++) {
+		ret = pm_runtime_get_sync(&spi->dev);
+		if (ret < 0) {
+			hid->open--;
+			goto done;
+		}
+		set_bit(SPI_HID_STARTED, &shid->flags);
+	}
+ done:
+	mutex_unlock(&spi_hid_open_mut);
+	return ret < 0 ? ret : 0;
 }
 
 
