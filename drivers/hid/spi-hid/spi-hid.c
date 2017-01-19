@@ -949,8 +949,7 @@ static inline int spi_hid_of_probe(struct spi_device *spi,
 }
 #endif
 
-static int spi_hid_probe(struct spi_device *spi,
-			 const struct spi_device_id *dev_id)
+static int spi_hid_probe(struct spi_device *spi)
 {
 	int ret;
 	struct spi_hid *shid;
