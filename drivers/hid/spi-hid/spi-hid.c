@@ -751,6 +751,492 @@ static int spi_hid_open(struct hid_device *hid)
 	return ret < 0 ? ret : 0;
 }
 
+static void spi_hid_close(struct hid_device *hid)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	/* protecting hid->open to make sure we don't restart
+	 * data acquistion due to a resumption we no longer
+	 * care about
+	 */
+	mutex_lock(&spi_hid_open_mut);
+	if (!--hid->open) {
+		clear_bit(SPI_HID_STARTED, &shid->flags);
+
+		/* Save some power */
+		pm_runtime_put(&spi->dev);
+	}
+	mutex_unlock(&spi_hid_open_mut);
+}
+
+static int spi_hid_power(struct hid_device *hid, int lvl)
+{
+	struct spi_device *spi = hid->driver_data;
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	spi_hid_dbg(shid, "%s lvl:%d\n", __func__, lvl);
+
+	switch (lvl) {
+	case PM_HINT_FULLON:
+		pm_runtime_get_sync(&spi->dev);
+		break;
+	case PM_HINT_NORMAL:
+		pm_runtime_put(&spi->dev);
+		break;
+	}
+	return 0;
+}
+
+static struct hid_ll_driver spi_hid_ll_driver = {
+	.parse = spi_hid_parse,
+	.start = spi_hid_start,
+	.stop = spi_hid_stop,
+	.open = spi_hid_open,
+	.close = spi_hid_close,
+	.power = spi_hid_power,
+	.output_report = spi_hid_output_report,
+	.raw_request = spi_hid_raw_request,
+};
+
+static int spi_hid_init_irq(struct spi_device *spi)
+{
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	int ret;
+
+	dev_dbg(&spi->dev, "Requesting IRQ: %d\n", shid->irq);
+
+	ret = request_threaded_irq(shid->irq, NULL, spi_hid_irq,
+				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
+				   spi->modalias, shid);
+	if (ret < 0) {
+		dev_warn(&spi->dev,
+			 "Could not register for %s interrupt, irq = %d,"
+			 " ret = %d\n",
+			 spi->modalias, shid->irq, ret);
+
+		return ret;
+	}
+
+	return 0;
+}
+
+static int spi_hid_fetch_hid_descriptor(struct spi_hid *shid)
+{
+	struct spi_device *spi = shid->spi;
+	struct spi_hid_desc *hdesc = &shid->hdesc;
+	unsigned int dsize;
+	int ret;
+
+	/* spi hid fetch using a fixed descriptor size (30 bytes) */
+	spi_hid_dbg(shid, "Fetching the HID descriptor\n");
+	ret = spi_hid_command(spi, &hid_descr_cmd, shid->hdesc_buffer,
+			      sizeof(struct spi_hid_desc));
+	if (ret) {
+		dev_err(&spi->dev, "hid_descr_cmd failed\n");
+		return -ENODEV;
+	}
+
+	/* Validate the length of HID descriptor, the 4 first bytes:
+	 * bytes 0-1 -> length
+	 * bytes 2-3 -> bcdVersion (has to be 1.00) */
+	/* check bcdVersion == 1.0 */
+	if (le16_to_cpu(hdesc->bcdVersion) != 0x0100) {
+		dev_err(&spi->dev,
+			"unexpected HID descriptor bcdVersion (0x%04hx)\n",
+			le16_to_cpu(hdesc->bcdVersion));
+		return -ENODEV;
+	}
+
+	/* Descriptor length should be 30 bytes as per the specification */
+	dsize = le16_to_cpu(hdesc->wHIDDescLength);
+	if (dsize != sizeof(struct spi_hid_desc)) {
+		dev_err(&spi->dev, "weird size of HID descriptor (%u)\n",
+			dsize);
+		return -ENODEV;
+	}
+	spi_hid_dbg(shid, "HID Descriptor: %*ph\n", dsize, shid->hdesc_buffer);
+	return 0;
+}
+
+#ifdef CONFIG_ACPI
+
+/* Default GPIO mapping */
+static const struct acpi_gpio_params spi_hid_irq_gpio = { 0, 0, true };
+static const struct acpi_gpio_mapping spi_hid_acpi_gpios[] = {
+	{ "gpios", &spi_hid_irq_gpio, 1 },
+	{ },
+};
+
+static int spi_hid_acpi_pdata(struct spi_device *spi,
+			      struct spi_hid_platform_data *pdata)
+{
+	static u8 spi_hid_guid[] = {
+		0xF7, 0xF6, 0xDF, 0x3C, 0x67, 0x42, 0x55, 0x45,
+		0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE,
+	};
+	union acpi_object *obj;
+	struct acpi_device *adev;
+	acpi_handle handle;
+	int ret;
+
+	handle = ACPI_HANDLE(&spi->dev);
+	if (!handle || acpi_bus_get_device(handle, &adev))
+		return -ENODEV;
+
+	obj = acpi_evaluate_dsm_typed(handle, spi_hid_guid, 1, 1, NULL,
+				      ACPI_TYPE_INTEGER);
+	if (!obj) {
+		dev_err(&spi->dev, "device _DSM execution failed\n");
+		return -ENODEV;
+	}
+
+	pdata->hid_descriptor_address = obj->integer.value;
+	ACPI_FREE(obj);
+
+	/* GPIOs are optional */
+	ret = acpi_dev_add_driver_gpios(adev, spi_hid_acpi_gpios);
+	return ret < 0 && ret != -ENXIO ? ret : 0;
+}
+
+static const struct acpi_device_id spi_hid_acpi_match[] = {
+	{"ACPI0C50", 0 },
+	{"PNP0C50", 0 },
+	{ },
+};
+MODULE_DEVICE_TABLE(acpi, spi_hid_acpi_match);
+#else
+static inline int spi_hid_acpi_pdata(struct spi_device *spi,
+				     struct spi_hid_platform_data *pdata)
+{
+	return -ENODEV;
+}
+#endif
+
+#ifdef CONFIG_OF
+static int spi_hid_of_probe(struct spi_device *spi,
+			    struct spi_hid_platform_data *pdata)
+{
+	struct device *dev = &spi->dev;
+	u32 val;
+	int ret;
+
+	ret = of_property_read_u32(dev->of_node, "hid-descr-addr", &val);
+	if (ret) {
+		dev_err(&spi->dev, "HID register address not provided\n");
+		return -ENODEV;
+	}
+	if (val >> 16) {
+		dev_err(&spi->dev, "Bad HID register address: 0x%08x\n",
+			val);
+		return -EINVAL;
+	}
+	pdata->hid_descriptor_address = val;
+
+	return 0;
+}
+
+static const struct of_device_id spi_hid_of_match[] = {
+	{ .compatible = "hid-over-spi" },
+	{},
+};
+MODULE_DEVICE_TABLE(of, spi_hid_of_match);
+#else
+static inline int spi_hid_of_probe(struct spi_device *spi,
+				   struct spi_hid_platform_data *pdata)
+{
+	return -ENODEV;
+}
+#endif
+
+static int spi_hid_probe(struct spi_device *spi,
+			 const struct spi_device_id *dev_id)
+{
+	int ret;
+	struct spi_hid *shid;
+	struct hid_device *hid;
+	__u16 hidRegister;
+	struct spi_hid_platform_data *platform_data = spi->dev.platform_data;
+
+	dbg_hid("HID probe called for spi 0x%02x\n", spi->chip_select);
+
+	shid = kzalloc(sizeof(struct spi_hid), GFP_KERNEL);
+	if (!shid)
+		return -ENOMEM;
+
+	if (spi->dev.of_node) {
+		ret = spi_hid_of_probe(spi, &shid->pdata);
+		if (ret)
+			goto err;
+	} else if (!platform_data) {
+		ret = spi_hid_acpi_pdata(spi, &shid->pdata);
+		if (ret) {
+			dev_err(&spi->dev,
+				"HID register address not provided\n");
+			goto err;
+		}
+	} else {
+		shid->pdata = *platform_data;
+	}
+
+	if (spi->irq > 0) {
+		shid->irq = spi->irq;
+	} else if (ACPI_COMPANION(&spi->dev)) {
+		shid->desc = gpiod_get(&spi->dev, NULL, GPIOD_IN);
+		if (IS_ERR(shid->desc)) {
+			dev_err(&spi->dev, "Failed to get GPIO interrupt\n");
+			return PTR_ERR(shid->desc);
+		}
+
+		shid->irq = gpiod_to_irq(shid->desc);
+		if (shid->irq < 0) {
+			gpiod_put(shid->desc);
+			dev_err(&spi->dev, "Failed to convert GPIO to IRQ\n");
+			return shid->irq;
+		}
+	}
+
+	spi_set_drvdata(spi, shid);
+
+	shid->spi = spi;
+
+	hidRegister = shid->pdata.hid_descriptor_address;
+	shid->wHIDDescRegister = cpu_to_le16(hidRegister);
+
+	init_waitqueue_head(&shid->wait);
+	mutex_init(&shid->reset_lock);
+
+	/* we need to allocate the command buffer without knowing the maximum
+	 * size of the reports. Let's use HID_MIN_BUFFER_SIZE, then we do the
+	 * real computation later. */
+	ret = spi_hid_alloc_buffers(shid, HID_MIN_BUFFER_SIZE);
+	if (ret < 0)
+		goto err;
+
+	pm_runtime_get_noresume(&spi->dev);
+	pm_runtime_set_active(&spi->dev);
+	pm_runtime_enable(&spi->dev);
+	device_enable_async_suspend(&spi->dev);
+
+	ret = spi_hid_fetch_hid_descriptor(shid);
+	if (ret < 0)
+		goto err_pm;
+
+	ret = spi_hid_init_irq(spi);
+	if (ret < 0)
+		goto err_pm;
+
+	hid = hid_allocate_device();
+	if (IS_ERR(hid)) {
+		ret = PTR_ERR(hid);
+		goto err_irq;
+	}
+
+	shid->hid = hid;
+
+	hid->driver_data = spi;
+	hid->ll_driver = &spi_hid_ll_driver;
+	hid->dev.parent = &spi->dev;
+	hid->bus = BUS_SPI;
+	hid->version = le16_to_cpu(shid->hdesc.bcdVersion);
+	hid->vendor = le16_to_cpu(shid->hdesc.wVendorID);
+	hid->product = le16_to_cpu(shid->hdesc.wProductID);
+
+	snprintf(hid->name, sizeof(hid->name), "%s %04hX:%04hX",
+		 spi->modalias, hid->vendor, hid->product);
+	strlcpy(hid->phys, dev_name(&spi->dev), sizeof(hid->phys));
+
+	ret = hid_add_device(hid);
+	if (ret) {
+		if (ret != -ENODEV)
+			hid_err(spi, "can't add hid device: %d\n", ret);
+		goto err_mem_free;
+	}
+
+	pm_runtime_put(&spi->dev);
+	return 0;
+
+ err_mem_free:
+	hid_destroy_device(hid);
+
+ err_irq:
+	free_irq(shid->irq, shid);
+
+ err_pm:
+	pm_runtime_put_noidle(&spi->dev);
+	pm_runtime_disable(&spi->dev);
+
+ err:
+	if (shid->desc)
+		gpiod_put(shid->desc);
+
+	spi_hid_free_buffers(shid);
+	kfree(shid);
+	return ret;
+}
+
+static int spi_hid_remove(struct spi_device *spi)
+{
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct hid_device *hid;
+
+	pm_runtime_get_sync(&spi->dev);
+	pm_runtime_disable(&spi->dev);
+	pm_runtime_set_suspended(&spi->dev);
+	pm_runtime_put_noidle(&spi->dev);
+
+	hid = shid->hid;
+	hid_destroy_device(hid);
+
+	free_irq(shid->irq, shid);
+
+	if (shid->bufsize)
+		spi_hid_free_buffers(shid);
+
+	if (shid->desc)
+		gpiod_put(shid->desc);
+
+	kfree(shid);
+
+	acpi_dev_remove_driver_gpios(ACPI_COMPANION(&spi->dev));
+
+	return 0;
+}
+
+static void spi_hid_shutdown(struct spi_device *spi)
+{
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
+	free_irq(spi->irq, shid);
+}
+
+#ifdef CONFIG_PM_SLEEP
+static int spi_hid_suspend(struct device *dev)
+{
+	struct spi_device *spi = to_spi_device(dev);
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct hid_device *hid = shid->hid;
+	int ret;
+	int wake_status;
+
+	if (hid->driver && hid->driver->suspend) {
+		/*
+		 * Wake up the device so that IO issues in
+		 * HID driver's suspend code can succeed.
+		 */
+		ret = pm_runtime_resume(dev);
+		if (ret < 0)
+			return ret;
+
+		ret = hid->driver->suspend(hid, PMSG_SUSPEND);
+		if (ret < 0)
+			return ret;
+	}
+
+	if (!pm_runtime_suspended(dev)) {
+		/* Save some power */
+		spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
+
+		disable_irq(shid->irq);
+	}
+
+	if (device_may_wakeup(&spi->dev)) {
+		wake_status = enable_irq_wake(shid->irq);
+		if (!wake_status)
+			shid->irq_wake_enabled = true;
+		else
+			hid_warn(hid, "Failed to enable irq wake: %d\n",
+				 wake_status);
+	}
+
+	return 0;
+}
+
+static int spi_hid_resume(struct device *dev)
+{
+	int ret;
+	struct spi_device *spi = to_spi_device(dev);
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct hid_device *hid = shid->hid;
+	int wake_status;
+
+	if (device_may_wakeup(&spi->dev) && shid->irq_wake_enabled) {
+		wake_status = disable_irq_wake(shid->irq);
+		if (!wake_status)
+			shid->irq_wake_enabled = false;
+		else
+			hid_warn(hid, "Failed to disable irq wake: %d\n",
+				 wake_status);
+	}
+
+	/* We'll resume to full power */
+	pm_runtime_disable(dev);
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+
+	enable_irq(shid->irq);
+	ret = spi_hid_hwreset(spi);
+	if (ret)
+		return ret;
+
+	if (hid->driver && hid->driver->reset_resume) {
+		ret = hid->driver->reset_resume(hid);
+		return ret;
+	}
+
+	return 0;
+}
+#endif
+
+#ifdef CONFIG_PM
+static int spi_hid_runtime_suspend(struct device *dev)
+{
+	struct spi_device *spi = to_spi_device(dev);
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
+	disable_irq(shid->irq);
+	return 0;
+}
+
+static int spi_hid_runtime_resume(struct device *dev)
+{
+	struct spi_device *spi = to_spi_device(dev);
+	struct spi_hid *shid = spi_get_drvdata(spi);
+
+	enable_irq(shid->irq);
+	spi_hid_set_power(spi, SPI_HID_PWR_ON);
+	return 0;
+}
+#endif
+
+static const struct dev_pm_ops spi_hid_pm = {
+	SET_SYSTEM_SLEEP_PM_OPS(spi_hid_suspend, spi_hid_resume)
+	SET_RUNTIME_PM_OPS(spi_hid_runtime_suspend, spi_hid_runtime_resume,
+			   NULL)
+};
+
+static const struct spi_device_id spi_hid_id_table[] = {
+	{ "hid", 0 },
+	{ "hid-over-spi", 0 },
+	{ },
+};
+MODULE_DEVICE_TABLE(spi, spi_hid_id_table);
+
+static struct spi_driver spi_hid_driver = {
+	.driver = {
+		.name	= "spi_hid",
+		.pm	= &spi_hid_pm,
+		.acpi_match_table = ACPI_PTR(spi_hid_acpi_match),
+		.of_match_table = of_match_ptr(spi_hid_of_match),
+	},
+
+	.probe		= spi_hid_probe,
+	.remove		= spi_hid_remove,
+	.shutdown	= spi_hid_shutdown,
+	.id_table	= spi_hid_id_table,
+};
 
 module_spi_driver(spi_hid_driver);
 
