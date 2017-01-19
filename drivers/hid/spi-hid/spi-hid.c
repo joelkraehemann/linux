@@ -50,10 +50,10 @@ static bool debug;
 module_param(debug, bool, 0444);
 MODULE_PARM_DESC(debug, "print a lot of debug information");
 
-#define spi_hid_dbg(ihid, fmt, arg...)					  \
+#define spi_hid_dbg(shid, fmt, arg...)					  \
 do {									  \
 	if (debug)							  \
-		dev_printk(KERN_DEBUG, &(ihid)->spi->dev, fmt, ##arg); \
+		dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
 } while (0)
 
 struct spi_hid_desc {
@@ -124,10 +124,6 @@ static DEFINE_MUTEX(spi_hid_open_mut);
 /* The main device structure */
 struct spi_hid {
 	struct spi_device *spi;                                      /* SPI device */
-	struct spi_bitbang *bitbang;
-
-	struct spi_transfer *transfer;
-	struct spi_message *message;
 
 	struct hid_device	*hid;	/* pointer to corresponding HID dev */
 	union {
@@ -160,8 +156,8 @@ static int __spi_hid_command(struct spi_device *spi,
 		u8 reportType, u8 *args, int args_len,
 		unsigned char *buf_recv, int data_len)
 {
-	struct spi_hid *ihid = spi_get_drvdata(client);
-	union command *cmd = (union command *)ihid->cmdbuf;
+	struct spi_hid *shid = spi_get_drvdata(client);
+	union command *cmd = (union command *)shid->cmdbuf;
 	struct spi_transfer t[2];
 	int num_xfers = 1;
 	int ret;
@@ -172,10 +168,10 @@ static int __spi_hid_command(struct spi_device *spi,
 
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
-		cmd->c.reg = ihid->wHIDDescRegister;
+		cmd->c.reg = shid->wHIDDescRegister;
 	} else {
-		cmd->data[0] = ihid->hdesc_buffer[registerIndex];
-		cmd->data[1] = ihid->hdesc_buffer[registerIndex + 1];
+		cmd->data[0] = shid->hdesc_buffer[registerIndex];
+		cmd->data[1] = shid->hdesc_buffer[registerIndex + 1];
 	}
 
 	if (length > 2) {
@@ -186,7 +182,7 @@ static int __spi_hid_command(struct spi_device *spi,
 	memcpy(cmd->data + length, args, args_len);
 	length += args_len;
 
-	spi_hid_dbg(ihid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
+	spi_hid_dbg(shid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
 	
 	t[0].tx_buf = cmd->data;
 	t[0].len = length;
@@ -196,16 +192,16 @@ static int __spi_hid_command(struct spi_device *spi,
 		t[1].len = data_len;
 		num_xfers++;
 		
-		set_bit(SPI_HID_READ_PENDING, &ihid->flags);
+		set_bit(SPI_HID_READ_PENDING, &shid->flags);
 	}
 
 	if (wait)
-		set_bit(SPI_HID_RESET_PENDING, &ihid->flags);
+		set_bit(SPI_HID_RESET_PENDING, &shid->flags);
 
 	ret = spi_sync_transfer(spi, t, num_xfers);
 
 	if (data_len > 0)
-		clear_bit(SPI_HID_READ_PENDING, &ihid->flags);
+		clear_bit(SPI_HID_READ_PENDING, &shid->flags);
 
 	
 	if (ret != num_xfers)
@@ -214,16 +210,220 @@ static int __spi_hid_command(struct spi_device *spi,
 	ret = 0;
 
 	if (wait) {
-		spi_hid_dbg(ihid, "%s: waiting...\n", __func__);
-		if (!wait_event_timeout(ihid->wait,
-				!test_bit(SPI_HID_RESET_PENDING, &ihid->flags),
+		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
+		if (!wait_event_timeout(shid->wait,
+				!test_bit(SPI_HID_RESET_PENDING, &shid->flags),
 				msecs_to_jiffies(5000)))
 			ret = -ENODATA;
-		spi_hid_dbg(ihid, "%s: finished.\n", __func__);
+		spi_hid_dbg(shid, "%s: finished.\n", __func__);
 	}
 
 	return ret;
 }
+
+static int spi_hid_command(struct spi_device *spi,
+			   const struct spi_hid_cmd *command,
+			   unsigned char *buf_recv, int data_len)
+{
+	return __spi_hid_command(spi, command, 0, 0, NULL, 0,
+				 buf_recv, data_len);
+}
+
+static int spi_hid_get_report(struct spi_device *spi, u8 reportType,
+			      u8 reportID, unsigned char *buf_recv, int data_len)
+{
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	u8 args[3];
+	int ret;
+	int args_len = 0;
+	u16 readRegister = le16_to_cpu(shid->hdesc.wDataRegister);
+
+	spi_hid_dbg(shid, "%s\n", __func__);
+
+	if (reportID >= 0x0F) {
+		args[args_len++] = reportID;
+		reportID = 0x0F;
+	}
+
+	args[args_len++] = readRegister & 0xFF;
+	args[args_len++] = readRegister >> 8;
+
+	ret = __spi_hid_command(spi, &hid_get_report_cmd, reportID,
+		reportType, args, args_len, buf_recv, data_len);
+	if (ret) {
+		dev_err(&spi->dev,
+			"failed to retrieve report from device.\n");
+		return ret;
+	}
+
+	return 0;
+}
+
+/**
+ * spi_hid_set_or_send_report: forward an incoming report to the device
+ * @spi: the spi_device of the device
+ * @reportType: 0x03 for HID_FEATURE_REPORT ; 0x02 for HID_OUTPUT_REPORT
+ * @reportID: the report ID
+ * @buf: the actual data to transfer, without the report ID
+ * @len: size of buf
+ * @use_data: true: use SET_REPORT HID command, false: send plain OUTPUT report
+ */
+static int spi_hid_set_or_send_report(struct spi_device *spi, u8 reportType,
+				      u8 reportID, unsigned char *buf, size_t data_len, bool use_data)
+{
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	u8 *args = shid->argsbuf;
+	const struct spi_hid_cmd *hidcmd;
+	int ret;
+	u16 dataRegister = le16_to_cpu(shid->hdesc.wDataRegister);
+	u16 outputRegister = le16_to_cpu(shid->hdesc.wOutputRegister);
+	u16 maxOutputLength = le16_to_cpu(shid->hdesc.wMaxOutputLength);
+	u16 size;
+	int args_len;
+	int index = 0;
+
+	spi_hid_dbg(shid, "%s\n", __func__);
+
+	if (data_len > shid->bufsize)
+		return -EINVAL;
+
+	size =		2			/* size */ +
+		(reportID ? 1 : 0)	/* reportID */ +
+		data_len		/* buf */;
+	args_len =	(reportID >= 0x0F ? 1 : 0) /* optional third byte */ +
+		2			/* dataRegister */ +
+		size			/* args */;
+
+	if (!use_data && maxOutputLength == 0)
+		return -ENOSYS;
+
+	if (reportID >= 0x0F) {
+		args[index++] = reportID;
+		reportID = 0x0F;
+	}
+
+	/*
+	 * use the data register for feature reports or if the device does not
+	 * support the output register
+	 */
+	if (use_data) {
+		args[index++] = dataRegister & 0xFF;
+		args[index++] = dataRegister >> 8;
+		hidcmd = &hid_set_report_cmd;
+	} else {
+		args[index++] = outputRegister & 0xFF;
+		args[index++] = outputRegister >> 8;
+		hidcmd = &hid_no_cmd;
+	}
+
+	args[index++] = size & 0xFF;
+	args[index++] = size >> 8;
+
+	if (reportID)
+		args[index++] = reportID;
+
+	memcpy(&args[index], buf, data_len);
+
+	ret = __spi_hid_command(spi, hidcmd, reportID,
+				reportType, args, args_len, NULL, 0);
+	if (ret) {
+		dev_err(&spi->dev, "failed to set a report to device.\n");
+		return ret;
+	}
+
+	return data_len;
+}
+
+
+static int i2c_hid_set_power(struct i2c_client *client, int power_state)
+{
+	struct i2c_hid *shid = i2c_get_clientdata(client);
+	int ret;
+
+	i2c_hid_dbg(shid, "%s\n", __func__);
+
+	ret = __i2c_hid_command(client, &hid_set_power_cmd, power_state,
+		0, NULL, 0, NULL, 0);
+	if (ret)
+		dev_err(&client->dev, "failed to change power setting.\n");
+
+	return ret;
+}
+
+static int spi_hid_hwreset(struct spi_device *spi)
+{
+	struct spi_hid *shid = spi_get_drvdata(spi);
+	int ret;
+
+	spi_hid_dbg(shid, "%s\n", __func__);
+
+	/*
+	 * This prevents sending feature reports while the device is
+	 * being reset. Otherwise we may lose the reset complete
+	 * interrupt.
+	 */
+	mutex_lock(&shid->reset_lock);
+
+	ret = spi_hid_set_power(spi, SPI_HID_PWR_ON);
+	if (ret)
+		goto out_unlock;
+
+	spi_hid_dbg(shid, "resetting...\n");
+
+	ret = spi_hid_command(spi, &hid_reset_cmd, NULL, 0);
+	if (ret) {
+		dev_err(&spi->dev, "failed to reset device.\n");
+		spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
+	}
+
+out_unlock:
+	mutex_unlock(&shid->reset_lock);
+	return ret;
+}
+
+static void spi_hid_get_input(struct spi_hid *shid)
+{
+	int ret, ret_size;
+	int size = le16_to_cpu(shid->hdesc.wMaxInputLength);
+
+	if (size > shid->bufsize)
+		size = shid->bufsize;
+
+	ret = spi_read(shid->spi, shid->inbuf, size);
+	if (ret != size) {
+		if (ret < 0)
+			return;
+
+		dev_err(&shid->spi->dev, "%s: got %d data instead of %d\n",
+			__func__, ret, size);
+		return;
+	}
+
+	ret_size = shid->inbuf[0] | shid->inbuf[1] << 8;
+
+	if (!ret_size) {
+		/* host or device initiated RESET completed */
+		if (test_and_clear_bit(SPI_HID_RESET_PENDING, &shid->flags))
+			wake_up(&shid->wait);
+		return;
+	}
+
+	if (ret_size > size) {
+		dev_err(&shid->spi->dev, "%s: incomplete report (%d/%d)\n",
+			__func__, size, ret_size);
+		return;
+	}
+
+	spi_hid_dbg(shid, "input: %*ph\n", ret_size, shid->inbuf);
+
+	if (test_bit(SPI_HID_STARTED, &shid->flags))
+		hid_input_report(shid->hid, HID_INPUT_REPORT, shid->inbuf + 2,
+				ret_size - 2, 1);
+
+	return;
+}
+
+
 
 module_spi_driver(spi_hid_driver);
 
