@@ -872,8 +872,8 @@ static int spi_hid_acpi_pdata(struct spi_device *spi,
 			      struct spi_hid_platform_data *pdata)
 {
 	static u8 spi_hid_guid[] = {
-		0xF7, 0xF6, 0xDF, 0x3C, 0x67, 0x42, 0x55, 0x45,
-		0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE,
+		0xa0, 0xb5, 0xb7, 0xc6, 0x13, 0x18, 0x44, 0x1c
+		0xb0, 0xc9, 0xfe, 0x69, 0x5e, 0xaf, 0x94, 0x9b,
 	};
 	union acpi_object *obj;
 	struct acpi_device *adev;
@@ -900,8 +900,7 @@ static int spi_hid_acpi_pdata(struct spi_device *spi,
 }
 
 static const struct acpi_device_id spi_hid_acpi_match[] = {
-	{"ACPI0C50", 0 },
-	{"PNP0C50", 0 },
+	{"APP000D", 0 },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, spi_hid_acpi_match);
@@ -949,46 +948,78 @@ static inline int spi_hid_of_probe(struct spi_device *spi,
 }
 #endif
 
+static void spi_hid_unregister_transport(void *data)
+{
+	struct spi_hid *shid = data;
+
+	/* TODO: implement me */
+}
+
 static int spi_hid_probe(struct spi_device *spi)
 {
 	int ret;
 	struct spi_hid *shid;
 	struct hid_device *hid;
 	__u16 hidRegister;
+	int i = 0;
 	struct spi_hid_platform_data *platform_data = spi->dev.platform_data;
 
 	dbg_hid("HID probe called for spi 0x%02x\n", spi->chip_select);
 
+	printk("spi-hid-probe %d", i);
+	i++;
+	
 	shid = kzalloc(sizeof(struct spi_hid), GFP_KERNEL);
 	if (!shid)
 		return -ENOMEM;
 
 	if (spi->dev.of_node) {
 		ret = spi_hid_of_probe(spi, &shid->pdata);
+	printk("spi-hid-probe a %d", i);
+	i++;
+	
 		if (ret)
 			goto err;
 	} else if (!platform_data) {
 		ret = spi_hid_acpi_pdata(spi, &shid->pdata);
+	printk("spi-hid-probe b %d", i);
+	i++;
+	
 		if (ret) {
 			dev_err(&spi->dev,
 				"HID register address not provided\n");
 			goto err;
 		}
 	} else {
+	printk("spi-hid-probe c %d", i);
+	i++;
+	
 		shid->pdata = *platform_data;
 	}
 
 	if (spi->irq > 0) {
+	printk("spi-hid-probe d %d", i);
+	i++;
+	
 		shid->irq = spi->irq;
 	} else if (ACPI_COMPANION(&spi->dev)) {
+	printk("spi-hid-probe e %d", i);
+	i++;
+	
 		shid->desc = gpiod_get(&spi->dev, NULL, GPIOD_IN);
 		if (IS_ERR(shid->desc)) {
+	printk("spi-hid-probe f %d", i);
+	i++;
+	
 			dev_err(&spi->dev, "Failed to get GPIO interrupt\n");
 			return PTR_ERR(shid->desc);
 		}
 
 		shid->irq = gpiod_to_irq(shid->desc);
 		if (shid->irq < 0) {
+	printk("spi-hid-probe g %d", i);
+	i++;
+	
 			gpiod_put(shid->desc);
 			dev_err(&spi->dev, "Failed to convert GPIO to IRQ\n");
 			return shid->irq;
@@ -1016,6 +1047,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	pm_runtime_set_active(&spi->dev);
 	pm_runtime_enable(&spi->dev);
 	device_enable_async_suspend(&spi->dev);
+
+	printk("spi-hid-probe %d", i);
+	i++;
 
 	ret = spi_hid_fetch_hid_descriptor(shid);
 	if (ret < 0)
@@ -1045,6 +1079,10 @@ static int spi_hid_probe(struct spi_device *spi)
 		 spi->modalias, hid->vendor, hid->product);
 	strlcpy(hid->phys, dev_name(&spi->dev), sizeof(hid->phys));
 
+	printk("spi-hid-probe %d", i);
+	i++;
+	
+
 	ret = hid_add_device(hid);
 	if (ret) {
 		if (ret != -ENODEV)
@@ -1052,6 +1090,21 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err_mem_free;
 	}
 
+	printk("spi-hid-probe %d", i);
+	i++;
+	
+
+	ret = devm_add_action_or_reset(&spi->dev,
+				       spi_hid_unregister_transport,
+				       shid);
+	if (ret)
+		goto err_mem_free;
+
+	printk("spi-hid-probe %d", i);
+	i++;
+	
+	dev_info(&spi->dev, "registered HID SPI driver\n");
+	
 	pm_runtime_put(&spi->dev);
 	return 0;
 
@@ -1240,5 +1293,5 @@ static struct spi_driver spi_hid_driver = {
 module_spi_driver(spi_hid_driver);
 
 MODULE_DESCRIPTION("HID over SPI core driver");
-MODULE_AUTHOR("Joël Krähemann <jkraehemann@gmail.com>");
+MODULE_AUTHOR("Joel Kraehemann <jkraehemann@gmail.com>");
 MODULE_LICENSE("GPL");
