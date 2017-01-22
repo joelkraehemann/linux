@@ -455,8 +455,8 @@ static void i2c_hid_init_report(struct hid_report *report, u8 *buffer,
 
 	size = i2c_hid_get_report_length(report);
 	if (i2c_hid_get_report(client,
-			report->type == HID_FEATURE_REPORT ? 0x03 : 0x01,
-			report->id, buffer, size))
+			       report->type == HID_FEATURE_REPORT ? 0x03 : 0x01,
+			       report->id, buffer, size))
 		return;
 
 	i2c_hid_dbg(ihid, "report (len=%d): %*ph\n", size, size, buffer);
@@ -497,8 +497,8 @@ static void i2c_hid_init_reports(struct hid_device *hid)
 	pm_runtime_get_sync(&client->dev);
 
 	list_for_each_entry(report,
-		&hid->report_enum[HID_FEATURE_REPORT].report_list, list)
-		i2c_hid_init_report(report, inbuf, ihid->bufsize);
+			    &hid->report_enum[HID_FEATURE_REPORT].report_list, list);
+	i2c_hid_init_report(report, inbuf, ihid->bufsize);
 
 	pm_runtime_put(&client->dev);
 

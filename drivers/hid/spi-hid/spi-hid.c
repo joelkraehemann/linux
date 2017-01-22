@@ -1,7 +1,7 @@
 /*
  * HID over SPI protocol implementation
  *
- * Copyright (c) 2017 Joël Krähemann <jkraehemann@gmail.com>
+ * Copyright (c) 2017 Joel Kraehemann <jkraehemann@gmail.com>
  *
  * This code is partly based on "HID over I2C protocol implementation":
  *
@@ -493,9 +493,9 @@ static void spi_hid_init_reports(struct hid_device *hid)
 	pm_runtime_get_sync(&spi->dev);
 
 	list_for_each_entry(report,
-			    &hid->report_enum[HID_FEATURE_REPORT].report_list, list)
-		spi_hid_init_report(report, inbuf, shid->bufsize);
-
+			    &hid->report_enum[HID_FEATURE_REPORT].report_list, list);
+	spi_hid_init_report(report, inbuf, shid->bufsize);
+	
 	pm_runtime_put(&spi->dev);
 
 	kfree(inbuf);

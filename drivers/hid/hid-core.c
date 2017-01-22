@@ -1664,7 +1664,7 @@ int hid_connect(struct hid_device *hdev, unsigned int connect_mask)
 		connect_mask |= (HID_CONNECT_HIDDEV_FORCE | HID_CONNECT_HIDDEV);
 	if (hdev->quirks & HID_QUIRK_HIDINPUT_FORCE)
 		connect_mask |= HID_CONNECT_HIDINPUT_FORCE;
-	if (hdev->bus != BUS_USB)
+	if (hdev->bus != BUS_USB && hdev->bus != BUS_SPI)
 		connect_mask &= ~HID_CONNECT_HIDDEV;
 	if (hid_hiddev(hdev))
 		connect_mask |= HID_CONNECT_HIDDEV_FORCE;
