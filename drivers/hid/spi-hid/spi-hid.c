@@ -880,6 +880,8 @@ static int spi_hid_acpi_pdata(struct spi_device *spi,
 	acpi_handle handle;
 	int ret;
 
+	printk("spi_hid_acpi_pdata()\n");
+	
 	handle = ACPI_HANDLE(&spi->dev);
 	if (!handle || acpi_bus_get_device(handle, &adev))
 		return -ENODEV;
@@ -936,7 +938,7 @@ static int spi_hid_of_probe(struct spi_device *spi,
 }
 
 static const struct of_device_id spi_hid_of_match[] = {
-	{ .compatible = "hid-over-spi" },
+	{ .compatible = "APPLE-SPI-TOPCASE" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, spi_hid_of_match);
@@ -966,7 +968,7 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	dbg_hid("HID probe called for spi 0x%02x\n", spi->chip_select);
 
-	printk("spi-hid-probe %d", i);
+	printk("spi-hid-probe %d\n", i);
 	i++;
 	
 	shid = kzalloc(sizeof(struct spi_hid), GFP_KERNEL);
@@ -975,14 +977,14 @@ static int spi_hid_probe(struct spi_device *spi)
 
 	if (spi->dev.of_node) {
 		ret = spi_hid_of_probe(spi, &shid->pdata);
-	printk("spi-hid-probe a %d", i);
+	printk("spi-hid-probe a %d\n", i);
 	i++;
 	
 		if (ret)
 			goto err;
 	} else if (!platform_data) {
 		ret = spi_hid_acpi_pdata(spi, &shid->pdata);
-	printk("spi-hid-probe b %d", i);
+	printk("spi-hid-probe b %d\n", i);
 	i++;
 	
 		if (ret) {
@@ -991,24 +993,24 @@ static int spi_hid_probe(struct spi_device *spi)
 			goto err;
 		}
 	} else {
-	printk("spi-hid-probe c %d", i);
+	printk("spi-hid-probe c %d\n", i);
 	i++;
 	
 		shid->pdata = *platform_data;
 	}
 
 	if (spi->irq > 0) {
-	printk("spi-hid-probe d %d", i);
+	printk("spi-hid-probe d %d\n", i);
 	i++;
 	
 		shid->irq = spi->irq;
 	} else if (ACPI_COMPANION(&spi->dev)) {
-	printk("spi-hid-probe e %d", i);
+	printk("spi-hid-probe e %d\n", i);
 	i++;
 	
 		shid->desc = gpiod_get(&spi->dev, NULL, GPIOD_IN);
 		if (IS_ERR(shid->desc)) {
-	printk("spi-hid-probe f %d", i);
+	printk("spi-hid-probe f %d\n", i);
 	i++;
 	
 			dev_err(&spi->dev, "Failed to get GPIO interrupt\n");
@@ -1017,7 +1019,7 @@ static int spi_hid_probe(struct spi_device *spi)
 
 		shid->irq = gpiod_to_irq(shid->desc);
 		if (shid->irq < 0) {
-	printk("spi-hid-probe g %d", i);
+	printk("spi-hid-probe g %d\n", i);
 	i++;
 	
 			gpiod_put(shid->desc);
@@ -1048,7 +1050,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	pm_runtime_enable(&spi->dev);
 	device_enable_async_suspend(&spi->dev);
 
-	printk("spi-hid-probe %d", i);
+	printk("spi-hid-probe %d\n", i);
 	i++;
 
 	ret = spi_hid_fetch_hid_descriptor(shid);
@@ -1079,7 +1081,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		 spi->modalias, hid->vendor, hid->product);
 	strlcpy(hid->phys, dev_name(&spi->dev), sizeof(hid->phys));
 
-	printk("spi-hid-probe %d", i);
+	printk("spi-hid-probe %d\n", i);
 	i++;
 	
 
@@ -1090,7 +1092,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err_mem_free;
 	}
 
-	printk("spi-hid-probe %d", i);
+	printk("spi-hid-probe %d\n", i);
 	i++;
 	
 
@@ -1100,7 +1102,7 @@ static int spi_hid_probe(struct spi_device *spi)
 	if (ret)
 		goto err_mem_free;
 
-	printk("spi-hid-probe %d", i);
+	printk("spi-hid-probe %d\n", i);
 	i++;
 	
 	dev_info(&spi->dev, "registered HID SPI driver\n");
@@ -1272,13 +1274,18 @@ static const struct dev_pm_ops spi_hid_pm = {
 static const struct spi_device_id spi_hid_id_table[] = {
 	{ "hid", 0 },
 	{ "hid-over-spi", 0 },
+	{ "apple-spi-topcase", 0 },
 	{ },
 };
 MODULE_DEVICE_TABLE(spi, spi_hid_id_table);
 
 static struct spi_driver spi_hid_driver = {
+	.id_table = spi_hid_id_table,
+	
 	.driver = {
 		.name	= "spi_hid",
+		.bus    = &spi_bus_type,
+		.owner  = THIS_MODULE,
 		.pm	= &spi_hid_pm,
 		.acpi_match_table = ACPI_PTR(spi_hid_acpi_match),
 		.of_match_table = of_match_ptr(spi_hid_of_match),

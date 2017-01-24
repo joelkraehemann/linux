@@ -1568,6 +1568,10 @@ static int pxa2xx_spi_fw_translate_cs(struct spi_master *master, unsigned cs)
 	return cs;
 }
 
+static struct spi_board_info apple_spi_topcase_board_info = {
+	.modalias = "apple-spi-topcase"
+};
+
 static int pxa2xx_spi_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -1578,7 +1582,7 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 	const struct lpss_config *config;
 	int status, count;
 	u32 tmp;
-
+	
 	platform_info = dev_get_platdata(dev);
 	if (!platform_info) {
 		platform_info = pxa2xx_spi_init_pdata(pdev);
@@ -1603,6 +1607,7 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 		pxa_ssp_free(ssp);
 		return -ENOMEM;
 	}
+
 	drv_data = spi_master_get_devdata(master);
 	drv_data->master = master;
 	drv_data->master_info = platform_info;
@@ -1769,6 +1774,10 @@ static int pxa2xx_spi_probe(struct platform_device *pdev)
 		goto out_error_clock_enabled;
 	}
 
+	/* new device APP000D */
+	platform_info->info[PXA2XX_SPI_BOARD_INFO_APPLE_SPI_TOPCASE] = &apple_spi_topcase_board_info;
+	spi_new_device(master, &apple_spi_topcase_board_info);
+	
 	return status;
 
 out_error_clock_enabled:

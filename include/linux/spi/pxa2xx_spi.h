@@ -15,11 +15,17 @@
 #define __linux_pxa2xx_spi_h
 
 #include <linux/pxa2xx_ssp.h>
+#include <linux/spi/spi.h>
 
 #define PXA2XX_CS_ASSERT (0x01)
 #define PXA2XX_CS_DEASSERT (0x02)
 
 struct dma_chan;
+
+enum{
+	PXA2XX_SPI_BOARD_INFO_APPLE_SPI_TOPCASE,
+	PXA2XX_SPI_BOARD_INFO_LAST,
+};
 
 /* device.platform_data for SSP controller devices */
 struct pxa2xx_spi_master {
@@ -33,6 +39,9 @@ struct pxa2xx_spi_master {
 
 	/* For non-PXA arches */
 	struct ssp_device ssp;
+
+	/* SPI board info */
+	struct spi_board_info *info[PXA2XX_SPI_BOARD_INFO_LAST];
 };
 
 /* spi_board_info.controller_data for SPI slave devices,
