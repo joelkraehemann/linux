@@ -33,9 +33,8 @@
 #include <linux/mutex.h>
 #include <linux/acpi.h>
 #include <linux/of.h>
-#include <linux/gpio/consumer.h>
 
-#include <linux/spi/spi-hid.h>
+#define SPI_HID_IOBUF_LENGTH    1024
 
 /* flags */
 #define SPI_HID_STARTED		0
@@ -56,6 +55,14 @@ MODULE_PARM_DESC(debug, "print a lot of debug information");
 			dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
 	} while (0)
 
+enum{
+	SPI_HID_ACCELEROMETER,
+	SPI_HID_ACTUATOR,
+	SPI_HID_DEVICE_MANAGEMENT,
+	SPI_HID_KEYBOARD_BOOT,
+	SPI_HID_TRACKPAD_BOOT,
+} spi_hid_type;
+
 struct spi_hid_desc {
 	__le16 wHIDDescLength;
 	__le16 bcdVersion;
@@ -74,6 +81,8 @@ struct spi_hid_desc {
 } __packed;
 
 struct spi_hid_cmd {
+	unsigned int device_type;
+	
 	unsigned int registerIndex;
 	__u8 opcode;
 	unsigned int length;
@@ -125,14 +134,8 @@ static DEFINE_MUTEX(spi_hid_open_mut);
 struct spi_hid {
 	struct spi_device *spi;                                      /* SPI device */
 
-	struct hid_device	*hid;	/* pointer to corresponding HID dev */
-	union {
-		__u8 hdesc_buffer[sizeof(struct spi_hid_desc)];
-		struct spi_hid_desc hdesc;	/* the HID Descriptor */
-	};
-	__le16			wHIDDescRegister; /* location of the spi
-						   * register of the HID
-						   * descriptor. */
+	struct hid_device	hid[sizeof(spi_hid_type)];           /* pointer to corresponding HID dev */
+
 	unsigned int		bufsize;	/* spi buffer size */
 	char			*inbuf;		/* Input buffer */
 	char			*rawbuf;	/* Raw Input buffer */
@@ -142,10 +145,7 @@ struct spi_hid {
 	unsigned long		flags;		/* device flags */
 
 	wait_queue_head_t	wait;		/* For waiting the interrupt */
-	struct gpio_desc	*desc;
-	int			irq;
-
-	struct spi_hid_platform_data pdata;
+	int                     irq;
 
 	bool			irq_wake_enabled;
 	struct mutex		reset_lock;
@@ -158,8 +158,14 @@ static int __spi_hid_command(struct spi_device *spi,
 {
 	struct spi_hid *shid = spi_get_drvdata(spi);
 	union command *cmd = (union command *)shid->cmdbuf;
-	struct spi_transfer t[2];
+	union _tx_rx_buf {
+		unsigned char tx_buf[command->length];
+		unsigned char rx_buf[data_len];
+		unsigned char hid_buf[SPI_HID_IOBUF_LENGTH];
+	}iobuf_tx, iobuf_rx;
+	unsigned int iobuf_limit = SPI_HID_IOBUF_LENGTH;
 	int num_xfers = 1;
+	int i = 0;
 	int ret;
 
 	int length = command->length;
@@ -184,30 +190,33 @@ static int __spi_hid_command(struct spi_device *spi,
 
 	spi_hid_dbg(shid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
 	
-	t[0].tx_buf = cmd->data;
-	t[0].len = length;
-	
-	if (data_len > 0) {
-		t[1].rx_buf = buf_recv;
-		t[1].len = data_len;
-		num_xfers++;
+	memset(&iobuf_tx, 0, iobuf_limit * sizeof(char));
+	memset(&iobuf_rx, 0, iobuf_limit * sizeof(char));
+
+	memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
 		
-		set_bit(SPI_HID_READ_PENDING, &shid->flags);
-	}
+	set_bit(SPI_HID_READ_PENDING, &shid->flags);
 
 	if (wait)
 		set_bit(SPI_HID_RESET_PENDING, &shid->flags);
 
-	ret = spi_sync_transfer(spi, t, num_xfers);
+	printk("HID tx data note:\n");
+
+	for(i = 0; i < iobuf_limit; i++){
+		printk("0x%x ", (unsigned char) iobuf_tx.tx_buf[i]);
+	}
+
+	printk("\n");
+
+	ret = spi_write_then_read(spi,
+				  iobuf_tx.tx_buf, length,
+				  iobuf_rx.rx_buf, data_len);
 
 	if (data_len > 0)
 		clear_bit(SPI_HID_READ_PENDING, &shid->flags);
-
 	
-	if (ret != num_xfers)
-		return ret < 0 ? ret : -EIO;
-
-	ret = 0;
+	if (ret != 0)
+		return -EIO;
 
 	if (wait) {
 		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
@@ -217,7 +226,19 @@ static int __spi_hid_command(struct spi_device *spi,
 			ret = -ENODATA;
 		spi_hid_dbg(shid, "%s: finished.\n", __func__);
 	}
+	
+	if(data_len > 0){
+		memcpy(buf_recv, iobuf_rx.rx_buf, data_len * sizeof(char));
 
+		printk("HID rx data note:\n");
+
+		for(i = 0; i < iobuf_limit; i++){
+			printk("0x%x ", (unsigned char) iobuf_rx.rx_buf[i]);
+		}
+
+		printk("\n");
+	}
+	
 	return ret;
 }
 
@@ -821,133 +842,20 @@ static int spi_hid_init_irq(struct spi_device *spi)
 	return 0;
 }
 
-static int spi_hid_fetch_hid_descriptor(struct spi_hid *shid)
-{
-	struct spi_device *spi = shid->spi;
-	struct spi_hid_desc *hdesc = &shid->hdesc;
-	unsigned int dsize;
-	int ret;
-
-	/* spi hid fetch using a fixed descriptor size (30 bytes) */
-	spi_hid_dbg(shid, "Fetching the HID descriptor\n");
-	ret = spi_hid_command(spi, &hid_descr_cmd, shid->hdesc_buffer,
-			      sizeof(struct spi_hid_desc));
-	if (ret) {
-		dev_err(&spi->dev, "hid_descr_cmd failed\n");
-		return -ENODEV;
-	}
-
-	/* Validate the length of HID descriptor, the 4 first bytes:
-	 * bytes 0-1 -> length
-	 * bytes 2-3 -> bcdVersion (has to be 1.00) */
-	/* check bcdVersion == 1.0 */
-	if (le16_to_cpu(hdesc->bcdVersion) != 0x0100) {
-		dev_err(&spi->dev,
-			"unexpected HID descriptor bcdVersion (0x%04hx)\n",
-			le16_to_cpu(hdesc->bcdVersion));
-		return -ENODEV;
-	}
-
-	/* Descriptor length should be 30 bytes as per the specification */
-	dsize = le16_to_cpu(hdesc->wHIDDescLength);
-	if (dsize != sizeof(struct spi_hid_desc)) {
-		dev_err(&spi->dev, "weird size of HID descriptor (%u)\n",
-			dsize);
-		return -ENODEV;
-	}
-	spi_hid_dbg(shid, "HID Descriptor: %*ph\n", dsize, shid->hdesc_buffer);
-	return 0;
-}
-
 #ifdef CONFIG_ACPI
-
-/* Default GPIO mapping */
-static const struct acpi_gpio_params spi_hid_irq_gpio = { 0, 0, true };
-static const struct acpi_gpio_mapping spi_hid_acpi_gpios[] = {
-	{ "gpios", &spi_hid_irq_gpio, 1 },
-	{ },
-};
-
-static int spi_hid_acpi_pdata(struct spi_device *spi,
-			      struct spi_hid_platform_data *pdata)
-{
-	static u8 spi_hid_guid[] = {
-		0xa0, 0xb5, 0xb7, 0xc6, 0x13, 0x18, 0x44, 0x1c,
-		0xb0, 0xc9, 0xfe, 0x69, 0x5e, 0xaf, 0x94, 0x9b,
-	};
-	union acpi_object *obj;
-	struct acpi_device *adev;
-	acpi_handle handle;
-	int ret;
-
-	printk("spi_hid_acpi_pdata()\n");
-	
-	handle = ACPI_HANDLE(&spi->dev);
-	if (!handle || acpi_bus_get_device(handle, &adev))
-		return -ENODEV;
-
-	obj = acpi_evaluate_dsm_typed(handle, spi_hid_guid, 1, 1, NULL,
-				      ACPI_TYPE_INTEGER);
-	if (!obj) {
-		dev_err(&spi->dev, "device _DSM execution failed\n");
-		return -ENODEV;
-	}
-
-	pdata->hid_descriptor_address = obj->integer.value;
-	ACPI_FREE(obj);
-
-	/* GPIOs are optional */
-	ret = acpi_dev_add_driver_gpios(adev, spi_hid_acpi_gpios);
-	return ret < 0 && ret != -ENXIO ? ret : 0;
-}
-
 static const struct acpi_device_id spi_hid_acpi_match[] = {
 	{"APP000D", 0 },
 	{ },
 };
 MODULE_DEVICE_TABLE(acpi, spi_hid_acpi_match);
-#else
-static inline int spi_hid_acpi_pdata(struct spi_device *spi,
-				     struct spi_hid_platform_data *pdata)
-{
-	return -ENODEV;
-}
 #endif
 
 #ifdef CONFIG_OF
-static int spi_hid_of_probe(struct spi_device *spi,
-			    struct spi_hid_platform_data *pdata)
-{
-	struct device *dev = &spi->dev;
-	u32 val;
-	int ret;
-
-	ret = of_property_read_u32(dev->of_node, "hid-descr-addr", &val);
-	if (ret) {
-		dev_err(&spi->dev, "HID register address not provided\n");
-		return -ENODEV;
-	}
-	if (val >> 16) {
-		dev_err(&spi->dev, "Bad HID register address: 0x%08x\n",
-			val);
-		return -EINVAL;
-	}
-	pdata->hid_descriptor_address = val;
-
-	return 0;
-}
-
 static const struct of_device_id spi_hid_of_match[] = {
 	{ .compatible = "APPLE-SPI-TOPCASE" },
 	{},
 };
 MODULE_DEVICE_TABLE(of, spi_hid_of_match);
-#else
-static inline int spi_hid_of_probe(struct spi_device *spi,
-				   struct spi_hid_platform_data *pdata)
-{
-	return -ENODEV;
-}
 #endif
 
 static void spi_hid_unregister_transport(void *data)
@@ -963,77 +871,23 @@ static int spi_hid_probe(struct spi_device *spi)
 	struct spi_hid *shid;
 	struct hid_device *hid;
 	__u16 hidRegister;
-	int i = 0;
-	struct spi_hid_platform_data *platform_data = spi->dev.platform_data;
-
+	int i;
+	
 	dbg_hid("HID probe called for spi 0x%02x\n", spi->chip_select);
-
-	printk("spi-hid-probe %d\n", i);
-	i++;
 	
 	shid = kzalloc(sizeof(struct spi_hid), GFP_KERNEL);
 	if (!shid)
 		return -ENOMEM;
 
-	if (spi->dev.of_node) {
-		ret = spi_hid_of_probe(spi, &shid->pdata);
-	printk("spi-hid-probe a %d\n", i);
-	i++;
-	
-		if (ret)
-			goto err;
-	} else if (!platform_data) {
-		ret = spi_hid_acpi_pdata(spi, &shid->pdata);
-	printk("spi-hid-probe b %d\n", i);
-	i++;
-	
-		if (ret) {
-			dev_err(&spi->dev,
-				"HID register address not provided\n");
-			goto err;
-		}
-	} else {
-	printk("spi-hid-probe c %d\n", i);
-	i++;
-	
-		shid->pdata = *platform_data;
-	}
-
 	if (spi->irq > 0) {
-	printk("spi-hid-probe d %d\n", i);
-	i++;
-	
 		shid->irq = spi->irq;
-	} else if (ACPI_COMPANION(&spi->dev)) {
-	printk("spi-hid-probe e %d\n", i);
-	i++;
-	
-		shid->desc = gpiod_get(&spi->dev, NULL, GPIOD_IN);
-		if (IS_ERR(shid->desc)) {
-	printk("spi-hid-probe f %d\n", i);
-	i++;
-	
-			dev_err(&spi->dev, "Failed to get GPIO interrupt\n");
-			return PTR_ERR(shid->desc);
-		}
-
-		shid->irq = gpiod_to_irq(shid->desc);
-		if (shid->irq < 0) {
-	printk("spi-hid-probe g %d\n", i);
-	i++;
-	
-			gpiod_put(shid->desc);
-			dev_err(&spi->dev, "Failed to convert GPIO to IRQ\n");
-			return shid->irq;
-		}
 	}
-
+	
 	spi_set_drvdata(spi, shid);
 
 	shid->spi = spi;
 
-	hidRegister = shid->pdata.hid_descriptor_address;
-	shid->wHIDDescRegister = cpu_to_le16(hidRegister);
+	ihid->wHIDDescRegister = 0;
 
 	init_waitqueue_head(&shid->wait);
 	mutex_init(&shid->reset_lock);
@@ -1050,40 +904,31 @@ static int spi_hid_probe(struct spi_device *spi)
 	pm_runtime_enable(&spi->dev);
 	device_enable_async_suspend(&spi->dev);
 
-	printk("spi-hid-probe %d\n", i);
-	i++;
-
-	ret = spi_hid_fetch_hid_descriptor(shid);
-	if (ret < 0)
-		goto err_pm;
-
 	ret = spi_hid_init_irq(spi);
 	if (ret < 0)
 		goto err_pm;
 
-	hid = hid_allocate_device();
-	if (IS_ERR(hid)) {
-		ret = PTR_ERR(hid);
-		goto err_irq;
+	for(i = 0; i < sizeof(spi_hid_type); i++){
+		hid = hid_allocate_device();
+		if (IS_ERR(hid)) {
+			ret = PTR_ERR(hid);
+			goto err_irq;
+		}
+
+		shid->hid[i] = hid;
+
+		hid->driver_data = spi;
+		hid->ll_driver = &spi_hid_ll_driver;
+		hid->dev.parent = &spi->dev;
+		hid->bus = BUS_SPI;
+		hid->version = le16_to_cpu(shid->hdesc.bcdVersion);
+		hid->vendor = le16_to_cpu(shid->hdesc.wVendorID);
+		hid->product = le16_to_cpu(shid->hdesc.wProductID);
 	}
-
-	shid->hid = hid;
-
-	hid->driver_data = spi;
-	hid->ll_driver = &spi_hid_ll_driver;
-	hid->dev.parent = &spi->dev;
-	hid->bus = BUS_SPI;
-	hid->version = le16_to_cpu(shid->hdesc.bcdVersion);
-	hid->vendor = le16_to_cpu(shid->hdesc.wVendorID);
-	hid->product = le16_to_cpu(shid->hdesc.wProductID);
 
 	snprintf(hid->name, sizeof(hid->name), "%s %04hX:%04hX",
 		 spi->modalias, hid->vendor, hid->product);
 	strlcpy(hid->phys, dev_name(&spi->dev), sizeof(hid->phys));
-
-	printk("spi-hid-probe %d\n", i);
-	i++;
-	
 
 	ret = hid_add_device(hid);
 	if (ret) {
@@ -1092,19 +937,12 @@ static int spi_hid_probe(struct spi_device *spi)
 		goto err_mem_free;
 	}
 
-	printk("spi-hid-probe %d\n", i);
-	i++;
-	
-
 	ret = devm_add_action_or_reset(&spi->dev,
 				       spi_hid_unregister_transport,
 				       shid);
 	if (ret)
 		goto err_mem_free;
 
-	printk("spi-hid-probe %d\n", i);
-	i++;
-	
 	dev_info(&spi->dev, "registered HID SPI driver\n");
 	
 	pm_runtime_put(&spi->dev);
@@ -1121,9 +959,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	pm_runtime_disable(&spi->dev);
 
  err:
-	if (shid->desc)
-		gpiod_put(shid->desc);
-
 	spi_hid_free_buffers(shid);
 	kfree(shid);
 	return ret;
@@ -1147,12 +982,7 @@ static int spi_hid_remove(struct spi_device *spi)
 	if (shid->bufsize)
 		spi_hid_free_buffers(shid);
 
-	if (shid->desc)
-		gpiod_put(shid->desc);
-
 	kfree(shid);
-
-	acpi_dev_remove_driver_gpios(ACPI_COMPANION(&spi->dev));
 
 	return 0;
 }
