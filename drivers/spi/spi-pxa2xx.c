@@ -1569,7 +1569,8 @@ static int pxa2xx_spi_fw_translate_cs(struct spi_master *master, unsigned cs)
 }
 
 static struct spi_board_info apple_spi_topcase_board_info = {
-	.modalias = "apple-spi-topcase"
+	.modalias = "apple-spi-topcase",
+	.irq = 0x0e, //TODO:JK: might be we should detect the interrupt
 };
 
 static int pxa2xx_spi_probe(struct platform_device *pdev)
