@@ -382,6 +382,9 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	}
 	
 	if (command->opcode == 0x02) {
+		cmd->data[0] = shid_device->hdesc_buffer[registerIndex];
+		cmd->data[1] = shid_device->hdesc_buffer[registerIndex + 1];
+
 		is_vio = 1;
 	}	
 	
@@ -427,14 +430,19 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 			shid_desc = shid_device->hdesc_buffer;
 			
-			buf_recv[0] = 0x02;
+			buf_recv[0] = HID_ITEM_FORMAT_SHORT;
 			buf_recv[1] = shid_desc[registerIndex];
 			buf_recv[2] = shid_desc[registerIndex + 1];
-		} else if (command->opcode == 0x02 ||
-			   &spit_vrom + cmd->c.reg == &vrom_entry->report.data) {
-			buf_recv[0] = 0xfe;
+		} else if (&spit_vrom + cmd->c.reg == &vrom_entry->report.data) {
+			buf_recv[0] = HID_ITEM_TAG_LONG;
 			buf_recv[1] = 0xff & vrom_entry->report.length;
-			buf_recv[2] = 0x0;
+			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
+
+			memcpy(buf_recv + 3, vrom_entry->report.data, buf_recv[1]);
+		} else if (command->opcode == 0x02) {
+			buf_recv[0] = HID_ITEM_TAG_LONG;
+			buf_recv[1] = 0xff & vrom_entry->report.length;
+			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
 
 			memcpy(buf_recv + 3, vrom_entry->report.data, buf_recv[1]);
 		}
