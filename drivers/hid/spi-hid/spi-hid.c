@@ -373,11 +373,17 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	vrom_entry = shid_device->vrom_entry;
 
 	/* ignore power commands */
-	if (command->opcode == 0x08) {
+	if (command->opcode == 0x01 ||
+	    command->opcode == 0x03 ||
+	    command->opcode == 0x08) {
 		mutex_unlock(&shid->driver_lock);
 		
 		return(0);
 	}
+	
+	if (command->opcode == 0x02) {
+		is_vio = 1;
+	}	
 	
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
@@ -424,7 +430,8 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			buf_recv[0] = 0x02;
 			buf_recv[1] = shid_desc[registerIndex];
 			buf_recv[2] = shid_desc[registerIndex + 1];
-		} else if (&spit_vrom + cmd->c.reg == &vrom_entry->report.data) {
+		} else if (command->opcode == 0x02 ||
+			   &spit_vrom + cmd->c.reg == &vrom_entry->report.data) {
 			buf_recv[0] = 0xfe;
 			buf_recv[1] = 0xff & vrom_entry->report.length;
 			buf_recv[2] = 0x0;
