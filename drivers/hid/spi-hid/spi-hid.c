@@ -371,6 +371,13 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 	spi = shid->spi;
 	vrom_entry = shid_device->vrom_entry;
+
+	/* ignore power commands */
+	if (command->opcode == 0x08) {
+		mutex_unlock(&shid->driver_lock);
+		
+		return(0);
+	}
 	
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
