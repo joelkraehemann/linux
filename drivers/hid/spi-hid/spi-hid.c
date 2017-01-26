@@ -319,6 +319,13 @@ struct spi_hid_device {
 		__u8                          hdesc_buffer[sizeof(struct spi_hid_desc)];     
 		struct spi_hid_desc           hdesc;                                         /* the HID Descriptor */
 	};
+
+	unsigned int		bufsize;	/* spi buffer size */
+	char			*inbuf;		/* Input buffer */
+	char			*rawbuf;	/* Raw Input buffer */
+	char                    *outbuf;        /* Output buffer */
+	char			*cmdbuf;	/* Command buffer */
+	char			*argsbuf;	/* Command arguments buffer */
 };
 
 /* The main device structure */
@@ -327,13 +334,6 @@ struct spi_hid {
 	struct mutex      driver_lock;          /* as you obtain driver_lock you may access struct */
 
 	struct spi_hid_device   shid_device[SPI_HID_LAST];
-
-	unsigned int		bufsize;	/* spi buffer size */
-	char			*inbuf;		/* Input buffer */
-	char			*rawbuf;	/* Raw Input buffer */
-	char                    *outbuf;        /* Output buffer */
-	char			*cmdbuf;	/* Command buffer */
-	char			*argsbuf;	/* Command arguments buffer */
 
 	unsigned long		flags;		/* device flags */
 
@@ -352,7 +352,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	struct spi_hid *shid = shid_device->parent;
 	struct spi_device *spi;
 	struct spi_hid_vrom_entry *vrom_entry;
-	union command *cmd = (union command *) shid->cmdbuf;
+	union command *cmd = (union command *) shid_device->cmdbuf;
 	union _tx_rx_buf {
 		unsigned char tx_buf[command->length];
 		unsigned char rx_buf[data_len];
@@ -373,18 +373,28 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	vrom_entry = shid_device->vrom_entry;
 
 	/* ignore power commands */
-	if (command->opcode == 0x01 ||
-	    command->opcode == 0x03 ||
-	    command->opcode == 0x08) {
+	if (command->opcode == 0x08) {
 		mutex_unlock(&shid->driver_lock);
 		
 		return(0);
 	}
-	
-	if (command->opcode == 0x02) {
-		cmd->data[0] = shid_device->hdesc_buffer[registerIndex];
-		cmd->data[1] = shid_device->hdesc_buffer[registerIndex + 1];
 
+	/* clear */
+	if (command->opcode == 0x01) {
+		memset(shid_device->inbuf, 0, shid_device->bufsize * sizeof(unsigned char));
+		memset(shid_device->rawbuf, 0, shid_device->bufsize * sizeof(unsigned char));
+		memset(shid_device->outbuf, 0, shid_device->bufsize * sizeof(unsigned char));
+		memset(shid_device->cmdbuf, 0, shid_device->bufsize * sizeof(unsigned char));
+		memset(shid_device->argsbuf, 0, shid_device->bufsize * sizeof(unsigned char));
+
+		mutex_unlock(&shid->driver_lock);
+		
+		return(0);
+	}
+
+	/* virtual Input/Output */
+	if (command->opcode == 0x02 ||
+	    command->opcode == 0x03) {
 		is_vio = 1;
 	}	
 	
@@ -434,35 +444,38 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			buf_recv[1] = shid_desc[registerIndex];
 			buf_recv[2] = shid_desc[registerIndex + 1];
 		} else if (&spit_vrom + cmd->c.reg == &vrom_entry->report.data) {
+			/* get report register address */
 			buf_recv[0] = HID_ITEM_TAG_LONG;
 			buf_recv[1] = 0xff & vrom_entry->report.length;
-			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
+			buf_recv[2] = HID_MAIN_ITEM_TAG_INPUT;
 
-			memcpy(buf_recv + 3, vrom_entry->report.data, buf_recv[1]);
+			if ((0xff & buf_recv[1]) > 0)
+				memcpy(buf_recv + 3, vrom_entry->report.data, 0xff & buf_recv[1]);
 		} else if (command->opcode == 0x02) {
+			/* get report */
 			buf_recv[0] = HID_ITEM_TAG_LONG;
 			buf_recv[1] = 0xff & vrom_entry->report.length;
-			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
+			buf_recv[2] = HID_MAIN_ITEM_TAG_INPUT;
 
-			memcpy(buf_recv + 3, vrom_entry->report.data, buf_recv[1]);
+			if ((0xff & buf_recv[1]) > 0) 
+				memcpy(buf_recv + 3, vrom_entry->report.data, 0xff & buf_recv[1]);
+		} else if (command->opcode == 0x03) {
+			/* set report */
+			if (args_len > 0) 
+				memcpy(shid_device->outbuf, args, args_len);
 		}
 	}
-	
-	mutex_lock(&shid->driver_lock);
 
-	
+	/* perform SPIT Input/Output */
 	if (!is_vio) {
 		memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
-
+		memcpy(vrom_entry->input, cmd->data, length * sizeof(unsigned char));
+		
 		set_bit(SPI_HID_READ_PENDING, &shid->flags);
 
 		if (wait)
 			set_bit(SPI_HID_RESET_PENDING, &shid->flags);
-	}
 
-	mutex_unlock(&shid->driver_lock);
-	
-	if (!is_vio) {
 		ret = spi_write_then_read(spi,
 					  iobuf_tx.tx_buf, length,
 					  iobuf_rx.rx_buf, data_len);
@@ -475,6 +488,30 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		}
 	}
 
+	/* perform memory mapped Input/Output */
+	if (is_vio) {
+		unsigned char *dest_buf = NULL;
+
+		if(&spit_vrom + cmd->c.reg == &vrom_entry->input){
+			dest_buf = vrom_entry->input;
+		}
+		
+		if(&spit_vrom + cmd->c.reg == &vrom_entry->output){
+			dest_buf = vrom_entry->output;
+		}
+		
+		if(&spit_vrom + cmd->c.reg == &vrom_entry->command){
+			dest_buf = vrom_entry->command;
+		}
+		
+		if(&spit_vrom + cmd->c.reg == &vrom_entry->data){
+			dest_buf = vrom_entry->data;
+		}
+
+		if (dest_buf != NULL)
+			memcpy(dest_buf, cmd->data, length * sizeof(unsigned char));
+	}
+	
 	/* event timeout */
 	if (wait) {
 		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
@@ -557,8 +594,8 @@ static int spi_hid_set_or_send_report(struct spi_hid_device *shid_device, u8 rep
 
 	spi = shid->spi;
 	
-	args = shid->argsbuf;
-	bufsize = shid->bufsize;
+	args = shid_device->argsbuf;
+	bufsize = shid_device->bufsize;
 	
 	mutex_unlock(&shid->driver_lock);
 
@@ -703,9 +740,9 @@ static void spi_hid_get_input(struct spi_hid_device *shid_device)
 
 	spi = shid->spi;
 
-	inbuf = shid->inbuf;
+	inbuf = shid_device->inbuf;
 	
-	bufsize = shid->bufsize;
+	bufsize = shid_device->bufsize;
 	
 	mutex_unlock(&shid->driver_lock);
 
@@ -730,7 +767,7 @@ static void spi_hid_get_input(struct spi_hid_device *shid_device)
 	/* check return size */
 	mutex_lock(&shid->driver_lock);
 
-	ret_size = shid->inbuf[0] | shid->inbuf[1] << 8;
+	ret_size = inbuf[0] | inbuf[1] << 8;
 
 	if (!ret_size) {
 		mutex_unlock(&shid->driver_lock);
@@ -752,10 +789,10 @@ static void spi_hid_get_input(struct spi_hid_device *shid_device)
 		return;
 	}
 
-	spi_hid_dbg(shid, "input: %*ph\n", ret_size, shid->inbuf);
+	spi_hid_dbg(shid, "input: %*ph\n", ret_size, inbuf);
 
 	if (test_bit(SPI_HID_STARTED, &shid->flags))
-		hid_input_report(shid_device->hid, HID_INPUT_REPORT, shid->inbuf + 2,
+		hid_input_report(shid_device->hid, HID_INPUT_REPORT, inbuf + 2,
 				 ret_size - 2, 1);
 
 	mutex_unlock(&shid->driver_lock);
@@ -854,7 +891,7 @@ static void spi_hid_init_reports(struct hid_device *hid)
 
 	spi = shid->spi;
 
-	bufsize = shid->bufsize;
+	bufsize = shid_device->bufsize;
 	
 	mutex_unlock(&shid->driver_lock);
 	
@@ -900,46 +937,59 @@ static void spi_hid_find_max_report(struct hid_device *hid, unsigned int type,
 
 static void spi_hid_free_buffers(struct spi_hid *shid)
 {
-	kfree(shid->inbuf);
-	kfree(shid->rawbuf);
-	kfree(shid->outbuf);
-	kfree(shid->argsbuf);
-	kfree(shid->cmdbuf);
-	shid->inbuf = NULL;
-	shid->rawbuf = NULL;
-	shid->outbuf = NULL;
-	shid->cmdbuf = NULL;
-	shid->argsbuf = NULL;
-	shid->bufsize = 0;
+	struct spi_hid_device *shid_device;
+	unsigned int i;
+	
+	for (i = 0; i < SPI_HID_LAST; i++) {
+		shid_device = &shid->shid_device[i];
+		
+		kfree(shid_device->inbuf);
+		kfree(shid_device->rawbuf);
+		kfree(shid_device->outbuf);
+		kfree(shid_device->argsbuf);
+		kfree(shid_device->cmdbuf);
+		shid_device->inbuf = NULL;
+		shid_device->rawbuf = NULL;
+		shid_device->outbuf = NULL;
+		shid_device->cmdbuf = NULL;
+		shid_device->argsbuf = NULL;
+		shid_device->bufsize = 0;
+	}
 }
 
 static int spi_hid_alloc_buffers(struct spi_hid *shid, size_t report_size)
 {
+	struct spi_hid_device *shid_device;	
 	/* the worst case is computed from the set_report command with a
 	 * reportID > 15 and the maximum report length */
 	int args_len = sizeof(__u8) + /* optional ReportID byte */
 		sizeof(__u16) + /* data register */
 		sizeof(__u16) + /* size of the report */
 		report_size; /* report */
-	
+	unsigned int i;
+
 	/* allocated buffers */
 	mutex_lock(&shid->driver_lock);
 
-	shid->inbuf = kzalloc(report_size, GFP_KERNEL);
-	shid->rawbuf = kzalloc(report_size, GFP_KERNEL);
-	shid->outbuf = kzalloc(report_size, GFP_KERNEL);
-	shid->argsbuf = kzalloc(args_len, GFP_KERNEL);
-	shid->cmdbuf = kzalloc(sizeof(union command) + args_len, GFP_KERNEL);
+	for (i = 0; i < SPI_HID_LAST; i++) {
+		shid_device = &shid->shid_device[i];
+		
+		shid_device->inbuf = kzalloc(report_size, GFP_KERNEL);
+		shid_device->rawbuf = kzalloc(report_size, GFP_KERNEL);
+		shid_device->outbuf = kzalloc(report_size, GFP_KERNEL);
+		shid_device->argsbuf = kzalloc(args_len, GFP_KERNEL);
+		shid_device->cmdbuf = kzalloc(sizeof(union command) + args_len, GFP_KERNEL);
 
-	if (!shid->inbuf || !shid->rawbuf || !shid->argsbuf || !shid->cmdbuf) {
-		mutex_unlock(&shid->driver_lock);
+		if (!shid_device->inbuf || !shid_device->rawbuf || !shid_device->argsbuf || !shid_device->cmdbuf) {
+			mutex_unlock(&shid->driver_lock);
 
-		spi_hid_free_buffers(shid);
+			spi_hid_free_buffers(shid);
 
-		return -ENOMEM;
+			return -ENOMEM;
+		}
+
+		shid_device->bufsize = report_size;
 	}
-
-	shid->bufsize = report_size;
 	
 	mutex_unlock(&shid->driver_lock);
 
@@ -966,8 +1016,8 @@ static int spi_hid_get_raw_report(struct hid_device *hid,
 
 	spi = shid->spi;
 
-	bufsize = shid->bufsize;
-	rawbuf = shid->rawbuf;
+	bufsize = shid_device->bufsize;
+	rawbuf = shid_device->rawbuf;
 	
 	mutex_unlock(&shid->driver_lock);
 
@@ -1123,7 +1173,7 @@ static int spi_hid_start(struct hid_device *hid)
 	/* common propertis */
 	mutex_lock(&shid->driver_lock);
 
-	bufsize = shid->bufsize;
+	bufsize = shid_device->bufsize;
 	
 	mutex_unlock(&shid->driver_lock);
 
@@ -1362,8 +1412,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	/* we need to allocate the command buffer without knowing the maximum
 	 * size of the reports. Let's use SPI_HID_IOBUF_LENGTH, then we do the
 	 * real computation later. */
-	shid->bufsize = SPI_HID_IOBUF_LENGTH;
-		
 	ret = spi_hid_alloc_buffers(shid, SPI_HID_IOBUF_LENGTH);
 	if (ret < 0)
 		goto err;
@@ -1397,10 +1445,12 @@ static int spi_hid_probe(struct spi_device *spi)
 		vrom_entry[i].hdesc = &shid_device->hdesc;
 		memcpy(&shid_device->hdesc, &shid_desc[i], sizeof(struct spi_hid_desc));
 		
-		vrom_entry[i].input = shid->inbuf;
-		vrom_entry[i].output = shid->outbuf;
-		vrom_entry[i].command = shid->cmdbuf;
-		vrom_entry[i].data = shid->argsbuf;
+		shid_device->bufsize = SPI_HID_IOBUF_LENGTH;
+		
+		vrom_entry[i].input = shid_device->inbuf;
+		vrom_entry[i].output = shid_device->outbuf;
+		vrom_entry[i].command = shid_device->cmdbuf;
+		vrom_entry[i].data = shid_device->argsbuf;
 		
 		/* SPI HID device */
 		shid_device->parent = shid;
@@ -1505,8 +1555,7 @@ static int spi_hid_remove(struct spi_device *spi)
 		hid_destroy_device(hid);
 	}
 	
-	if (shid->bufsize)
-		spi_hid_free_buffers(shid);
+	spi_hid_free_buffers(shid);
 
 	kfree(shid);
 
