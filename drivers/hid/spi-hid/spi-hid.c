@@ -40,11 +40,15 @@
 #include <linux/of.h>
 #include <uapi/linux/hiddev.h>
 
+#include "../hid-ids.h"
+
 #define spi_hid_dbg(shid, fmt, arg...)					\
 	do {								\
 		if (debug)						\
 			dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
 	} while (0)
+
+#define SPI_HID_VROM_VERSION_ID 0x01
 
 #define SPI_HID_IOBUF_LENGTH    2048
 
@@ -71,9 +75,8 @@ enum{
 } spi_hid_type;
 
 struct spi_hid_report {
+	__le16 length;	
 	u8 data[SPI_HID_IOBUF_LENGTH];
-
-	unsigned int length;
 };
 
 struct spi_hid_desc {
@@ -139,37 +142,160 @@ static const struct spi_hid_cmd hid_no_cmd =		{ .length = 0 };
  * static const struct spi_hid_cmd hid_set_protocol_cmd = { SPI_HID_CMD(0x07) };
  */
 
-static const struct spi_hid_report accelerometer_report = {
-	.data = "\x06\x00\xff\x09\x03\xa1\x01\x06\x00\xff\x09\x03\x15\x00\x26\xff\x00\x85\xc0\x96\x6b\x00\x75\x08\x81\x02\xc0",
-	.length = 27,
+struct spi_hid_vrom_header {
+	__le16 vrom_size;
 };
 
-static const struct spi_hid_report actuator_report = {
-	.data = "\x06\x00\xff\x09\x0d\xa1\x01\x06\x00\xff\x09\x0d\x15\x00\x26\xff\x00\x75\x08\x85\x3f\x96\x0f\x00\x81\x02\x09\x0d\x85\x53\x96\x3f\x00\x91\x02\xc0",
-	.length = 36,
+struct spi_hid_vrom_entry {
+	struct spi_hid_report report;
+	unsigned char *input;
+	unsigned char *output;
+	unsigned char *command;
+	unsigned char *data;
 };
 
-static const struct spi_hid_report device_management_report = {
-	.data = "\x06\x00\xff\x09\x0b\xa1\x01\x06\x00\xff\x09\x0b\x15\x00\x26\xff\x00\x75\x08\x96\x04\x00\x85\xe0\x81\x22\xc0",
-	.length = 27,
+struct spi_hid_vrom {
+	__u8 vrom_data[0];
+
+	struct spi_hid_vrom_header header;
+	
+	struct spi_hid_vrom_entry accelerometer;
+	struct spi_hid_vrom_entry actuator;
+	struct spi_hid_vrom_entry device_management;
+	struct spi_hid_vrom_entry trackpad_boot;
+	struct spi_hid_vrom_entry keyboard_boot;
 };
 
-static const struct spi_hid_report keyboard_boot_report = {
-	.data = "\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x01\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x01\x95\x06\x75\x08\x15\x00\x26\xff\x00\x05\x07\x19\x00\x29\xff\x81\x00\x05\x0c\x75\x01\x95\x01\x09\xb8\x15\x00\x25\x01\x81\x02\x05\xff\x09\x03\x75\x07\x95\x01\x81\x02\xc0\x05\x0c\x09\x01\xa1\x01\x85\x52\x15\x00\x25\x01\x75\x01\x95\x01\x09\xcd\x81\x02\x09\xb3\x81\x02\x09\xb4\x81\x02\x09\xb5\x81\x02\x09\xb6\x81\x02\x81\x01\x81\x01\x81\x01\x85\x09\x15\x00\x25\x01\x75\x08\x95\x01\x06\x01\xff\x09\x0b\xb1\x02\x75\x08\x95\x02\xb1\x01\xc0\x06\x00\xff\x09\x06\xa1\x01\x06\x00\xff\x09\x06\x15\x00\x26\xff\x00\x75\x08\x95\x40\x85\x3f\x81\x22\xc0\x06\x00\xff\x09\x0f\xa1\x01\x06\x00\xff\x09\x0f\x15\x00\x26\xff\x00\x75\x08\x95\x0f\x85\xbf\x81\x02\xc0",
-	.length = 208,
-};
+struct spi_hid_vrom spit_vrom = {
+	.header = {
+		.vrom_size = sizeof(struct spi_hid_vrom),
+	},
+	
+	/* accelerometer report */
+	.accelerometer.report = {
+		.length = 27,
+		.data = "\x06\x00\xff\x09\x03\xa1\x01\x06\x00\xff\x09\x03\x15\x00\x26\xff\x00\x85\xc0\x96\x6b\x00\x75\x08\x81\x02\xc0",
+	}, 
+	
+	/* actuator report */
+	.actuator.report = {
+		.length = 36,
+		.data = "\x06\x00\xff\x09\x0d\xa1\x01\x06\x00\xff\x09\x0d\x15\x00\x26\xff\x00\x75\x08\x85\x3f\x96\x0f\x00\x81\x02\x09\x0d\x85\x53\x96\x3f\x00\x91\x02\xc0",
+	},
 
-static const struct spi_hid_report trackpad_boot_report = {
-	.data = "\x05\x01\x09\x02\xa1\x01\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x85\x02\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x01\x05\x01\x09\x30\x09\x31\x15\x81\x25\x7f\x75\x08\x95\x02\x81\x06\x95\x04\x75\x08\x81\x01\xc0\xc0\x05\x0d\x09\x05\xa1\x01\x06\x00\xff\x09\x0c\x15\x00\x26\xff\x00\x75\x08\x95\x10\x85\x3f\x81\x22\xc0\x06\x00\xff\x09\x0c\xa1\x01\x06\x00\xff\x09\x0c\x15\x00\x26\xff\x00\x85\x44\x75\x08\x96\x57\x05\x81\x00\xc0",
-	.length = 110,
+	/* device management report */
+	.device_management.report = {
+		.length = 27,
+		.data = "\x06\x00\xff\x09\x0b\xa1\x01\x06\x00\xff\x09\x0b\x15\x00\x26\xff\x00\x75\x08\x96\x04\x00\x85\xe0\x81\x22\xc0",
+	},
+	
+	/* trackpad/boot report */
+	.trackpad_boot.report = {
+		.length = 110,
+		.data = "\x05\x01\x09\x02\xa1\x01\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x85\x02\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x01\x05\x01\x09\x30\x09\x31\x15\x81\x25\x7f\x75\x08\x95\x02\x81\x06\x95\x04\x75\x08\x81\x01\xc0\xc0\x05\x0d\x09\x05\xa1\x01\x06\x00\xff\x09\x0c\x15\x00\x26\xff\x00\x75\x08\x95\x10\x85\x3f\x81\x22\xc0\x06\x00\xff\x09\x0c\xa1\x01\x06\x00\xff\x09\x0c\x15\x00\x26\xff\x00\x85\x44\x75\x08\x96\x57\x05\x81\x00\xc0",
+	},
+	
+	/* keyboard/boot report */
+	.keyboard_boot.report = {
+		.length = 208,
+		.data = "\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x01\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x01\x95\x06\x75\x08\x15\x00\x26\xff\x00\x05\x07\x19\x00\x29\xff\x81\x00\x05\x0c\x75\x01\x95\x01\x09\xb8\x15\x00\x25\x01\x81\x02\x05\xff\x09\x03\x75\x07\x95\x01\x81\x02\xc0\x05\x0c\x09\x01\xa1\x01\x85\x52\x15\x00\x25\x01\x75\x01\x95\x01\x09\xcd\x81\x02\x09\xb3\x81\x02\x09\xb4\x81\x02\x09\xb5\x81\x02\x09\xb6\x81\x02\x81\x01\x81\x01\x81\x01\x85\x09\x15\x00\x25\x01\x75\x08\x95\x01\x06\x01\xff\x09\x0b\xb1\x02\x75\x08\x95\x02\xb1\x01\xc0\x06\x00\xff\x09\x06\xa1\x01\x06\x00\xff\x09\x06\x15\x00\x26\xff\x00\x75\x08\x95\x40\x85\x3f\x81\x22\xc0\x06\x00\xff\x09\x0f\xa1\x01\x06\x00\xff\x09\x0f\x15\x00\x26\xff\x00\x75\x08\x95\x0f\x85\xbf\x81\x02\xc0",
+	},
 };
 
 static const struct spi_hid_report *shid_report[SPI_HID_LAST] = {
-	&accelerometer_report,
-	&actuator_report,
-	&device_management_report,
-	&keyboard_boot_report,
-	&trackpad_boot_report,
+	&spit_vrom.accelerometer.report,
+	&spit_vrom.actuator.report,
+	&spit_vrom.device_management.report,
+	&spit_vrom.keyboard_boot.report,
+	&spit_vrom.trackpad_boot.report,
+};
+
+struct spi_hid_desc shid_desc[SPI_HID_LAST] = {
+
+	/* SPI_HID_ACCELEROMETER */
+	{
+		.wHIDDescLength = 0x01,
+		.bcdVersion = 0x03,
+		.wReportDescLength = sizeof(spit_vrom.accelerometer.report.data),
+		.wReportDescRegister = (void *) (&spit_vrom.accelerometer.report.data) - (void *) spit_vrom.vrom_data,
+		.wInputRegister = (void *) (&spit_vrom.accelerometer.input) - (void *) spit_vrom.vrom_data,
+		.wMaxInputLength = SPI_HID_IOBUF_LENGTH,
+		.wOutputRegister = (void *) (&spit_vrom.accelerometer.output) - (void *) spit_vrom.vrom_data,
+		.wMaxOutputLength = SPI_HID_IOBUF_LENGTH,
+		.wCommandRegister = (void *) (&spit_vrom.accelerometer.command) - (void *) spit_vrom.vrom_data,
+		.wDataRegister = (void *) (&spit_vrom.accelerometer.data) - (void *) spit_vrom.vrom_data,
+		.wVendorID = SPI_VENDOR_ID_APPLE,
+		.wProductID = SPI_DEVICE_ID_APPLE_INTERNAL_KEYBOARD_2016_ISO,
+		.wVersionID = SPI_HID_VROM_VERSION_ID,
+	},
+
+	/* SPI_HID_ACTUATOR */
+	{
+		.wHIDDescLength = 0x01,
+		.bcdVersion = 0x03,
+		.wReportDescLength = sizeof(spit_vrom.actuator.report.data),
+		.wReportDescRegister = (void *) (&spit_vrom.actuator.report.data) - (void *) spit_vrom.vrom_data,
+		.wInputRegister = (void *) (&spit_vrom.actuator.input) - (void *) spit_vrom.vrom_data,
+		.wMaxInputLength = SPI_HID_IOBUF_LENGTH,
+		.wOutputRegister = (void *) (&spit_vrom.actuator.output) - (void *) spit_vrom.vrom_data,
+		.wMaxOutputLength = SPI_HID_IOBUF_LENGTH,
+		.wCommandRegister = (void *) (&spit_vrom.actuator.command) - (void *) spit_vrom.vrom_data,
+		.wDataRegister = (void *) (&spit_vrom.actuator.data) - (void *) spit_vrom.vrom_data,
+		.wVendorID = SPI_VENDOR_ID_APPLE,
+		.wProductID = SPI_DEVICE_ID_APPLE_INTERNAL_KEYBOARD_2016_ISO,
+		.wVersionID = SPI_HID_VROM_VERSION_ID,
+	},
+
+	/* SPI_HID_DEVICE_MANAGEMENT */
+	{
+		.wHIDDescLength = 0x01,
+		.bcdVersion = 0x03,
+		.wReportDescLength = sizeof(spit_vrom.device_management.report.data),
+		.wReportDescRegister = (void *) (&spit_vrom.device_management.report.data) - (void *) spit_vrom.vrom_data,
+		.wInputRegister = (void *) (&spit_vrom.device_management.input) - (void *) spit_vrom.vrom_data,
+		.wMaxInputLength = SPI_HID_IOBUF_LENGTH,
+		.wOutputRegister = (void *) (&spit_vrom.device_management.output) - (void *) spit_vrom.vrom_data,
+		.wMaxOutputLength = SPI_HID_IOBUF_LENGTH,
+		.wCommandRegister = (void *) (&spit_vrom.device_management.command) - (void *) spit_vrom.vrom_data,
+		.wDataRegister = (void *) (&spit_vrom.device_management.data) - (void *) spit_vrom.vrom_data,
+		.wVendorID = SPI_VENDOR_ID_APPLE,
+		.wProductID = SPI_DEVICE_ID_APPLE_INTERNAL_KEYBOARD_2016_ISO,
+		.wVersionID = SPI_HID_VROM_VERSION_ID,
+	},
+
+	/* SPI_HID_KEYBOARD_BOOT */
+	{
+		.wHIDDescLength = 0x01,
+		.bcdVersion = 0x03,
+		.wReportDescLength = sizeof(spit_vrom.trackpad_boot.report.data),
+		.wReportDescRegister = (void *) (&spit_vrom.trackpad_boot.report.data) - (void *) spit_vrom.vrom_data,
+		.wInputRegister = (void *) (&spit_vrom.trackpad_boot.input) - (void *) spit_vrom.vrom_data,
+		.wMaxInputLength = SPI_HID_IOBUF_LENGTH,
+		.wOutputRegister = (void *) (&spit_vrom.trackpad_boot.output) - (void *) spit_vrom.vrom_data,
+		.wMaxOutputLength = SPI_HID_IOBUF_LENGTH,
+		.wCommandRegister = (void *) (&spit_vrom.trackpad_boot.command) - (void *) spit_vrom.vrom_data,
+		.wDataRegister = (void *) (&spit_vrom.trackpad_boot.data) - (void *) spit_vrom.vrom_data,
+		.wVendorID = SPI_VENDOR_ID_APPLE,
+		.wProductID = SPI_DEVICE_ID_APPLE_INTERNAL_KEYBOARD_2016_ISO,
+		.wVersionID = SPI_HID_VROM_VERSION_ID,
+	},
+
+	/* SPI_HID_TRACKPAD_BOOT */
+	{
+		.wHIDDescLength = 0x01,
+		.bcdVersion = 0x03,
+		.wReportDescLength = sizeof(spit_vrom.keyboard_boot.report.data),
+		.wReportDescRegister = (void *) (&spit_vrom.keyboard_boot.report.data) - (void *) spit_vrom.vrom_data,
+		.wInputRegister = (void *) (&spit_vrom.keyboard_boot.input) - (void *) spit_vrom.vrom_data,
+		.wMaxInputLength = SPI_HID_IOBUF_LENGTH,
+		.wOutputRegister = (void *) (&spit_vrom.keyboard_boot.output) - (void *) spit_vrom.vrom_data,
+		.wMaxOutputLength = SPI_HID_IOBUF_LENGTH,
+		.wCommandRegister = (void *) (&spit_vrom.keyboard_boot.command) - (void *) spit_vrom.vrom_data,
+		.wDataRegister = (void *) (&spit_vrom.keyboard_boot.data) - (void *) spit_vrom.vrom_data,
+		.wVendorID = SPI_VENDOR_ID_APPLE,
+		.wProductID = SPI_DEVICE_ID_APPLE_INTERNAL_KEYBOARD_2016_ISO,
+		.wVersionID = SPI_HID_VROM_VERSION_ID,
+	},
 };
 
 static DEFINE_MUTEX(spi_hid_open_mut);
@@ -178,9 +304,11 @@ static DEFINE_MUTEX(spi_hid_open_mut);
 struct spi_hid_device {
 	void *parent;
 	
-	struct hid_device	*hid;           /* pointer to corresponding HID dev */
-	const struct spi_hid_report   *report;  /* Report provided in RAM */
+	struct hid_device	*hid;                 /* pointer to corresponding HID dev */
+	const struct spi_hid_report   *report;        /* Report provided in RAM */
 
+	struct spi_hid_vrom_entry     *vrom_entry;    /* just in case you might want to match IO VROM register - it's thread-safe */
+	
 	union {
 		__u8                          hdesc_buffer[sizeof(struct spi_hid_desc)];     
 		struct spi_hid_desc           hdesc;                                         /* the HID Descriptor */
@@ -194,10 +322,14 @@ struct spi_hid {
 	struct mutex      driver_lock;          /* as you obtain driver_lock you may access struct */
 
 	struct spi_hid_device   shid_device[SPI_HID_LAST];
+	__le16			wHIDDescRegister; /* location of the SPIT VROM
+						   * register of the HID
+						   * descriptor. */
 
 	unsigned int		bufsize;	/* spi buffer size */
 	char			*inbuf;		/* Input buffer */
 	char			*rawbuf;	/* Raw Input buffer */
+	char                    *outbuf;        /* Output buffer */
 	char			*cmdbuf;	/* Command buffer */
 	char			*argsbuf;	/* Command arguments buffer */
 
@@ -237,7 +369,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
-		length = sizeof(shid_device->report->data);
+		cmd->c.reg = shid->wHIDDescRegister;
 	} else {
 		cmd->data[0] = shid_device->hdesc_buffer[registerIndex];
 		cmd->data[1] = shid_device->hdesc_buffer[registerIndex + 1];
@@ -287,10 +419,31 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 	mutex_unlock(&shid->driver_lock);
 	
-	if(data_len > 0){
+	if (data_len > 0) {
 		memcpy(buf_recv, iobuf_rx.rx_buf, data_len * sizeof(char));
 	}
 
+	/* match IO register against VROM */
+	mutex_lock(&shid->driver_lock);
+
+	if (cmd->c.reg == (void *) (&shid_device->vrom_entry->report.data) - (void *) spit_vrom.vrom_data) {
+		/* Must be GET since read-only */
+		memcpy(shid_device->vrom_entry->output, shid_device->vrom_entry->report.data, sizeof(shid_device->vrom_entry->report.data));
+	} else if (cmd->c.reg == (void *) (&shid_device->vrom_entry->input) - (void *) spit_vrom.vrom_data) {
+		/* write */
+		memcpy(shid_device->vrom_entry->input, iobuf_rx.tx_buf, length);
+	} else if (cmd->c.reg == (void *) (&shid_device->vrom_entry->output) - (void *) spit_vrom.vrom_data) {
+		/* read */
+		memcpy(shid_device->vrom_entry->output, iobuf_rx.rx_buf, data_len);
+	} else if (!(cmd->c.reg == (void *) (&shid_device->vrom_entry->command) - (void *) spit_vrom.vrom_data ||
+		     cmd->c.reg == (void *) (&shid_device->vrom_entry->data) - (void *) spit_vrom.vrom_data)) {
+		/* command and data ignored */
+		spi_hid_dbg(shid, "%s: unexcpected IO register\n", __func__);
+	}
+
+	mutex_unlock(&shid->driver_lock);
+
+	/* event timeout */
 	if (wait) {
 		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
 		if (!wait_event_timeout(shid->wait,
@@ -717,10 +870,12 @@ static void spi_hid_free_buffers(struct spi_hid *shid)
 {
 	kfree(shid->inbuf);
 	kfree(shid->rawbuf);
+	kfree(shid->outbuf);
 	kfree(shid->argsbuf);
 	kfree(shid->cmdbuf);
 	shid->inbuf = NULL;
 	shid->rawbuf = NULL;
+	shid->outbuf = NULL;
 	shid->cmdbuf = NULL;
 	shid->argsbuf = NULL;
 	shid->bufsize = 0;
@@ -740,6 +895,7 @@ static int spi_hid_alloc_buffers(struct spi_hid *shid, size_t report_size)
 
 	shid->inbuf = kzalloc(report_size, GFP_KERNEL);
 	shid->rawbuf = kzalloc(report_size, GFP_KERNEL);
+	shid->outbuf = kzalloc(report_size, GFP_KERNEL);
 	shid->argsbuf = kzalloc(args_len, GFP_KERNEL);
 	shid->cmdbuf = kzalloc(sizeof(union command) + args_len, GFP_KERNEL);
 
@@ -1153,6 +1309,7 @@ static int spi_hid_probe(struct spi_device *spi)
 {
 	int ret;
 	struct spi_hid *shid;
+	struct spi_hid_vrom_entry *vrom_entry = (struct spi_hid_vrom_entry *) &spit_vrom.vrom_data[sizeof(struct spi_hid_vrom_header)];
 	int i;
 	
 	dbg_hid("HID probe called for spi 0x%02x\n", spi->chip_select);
@@ -1167,6 +1324,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	shid->spi = spi;
 
 	mutex_init(&shid->driver_lock);
+
+	shid->wHIDDescRegister = 0x0;
 
 	init_waitqueue_head(&shid->wait);
 	mutex_init(&shid->reset_lock);
@@ -1198,6 +1357,15 @@ static int spi_hid_probe(struct spi_device *spi)
 		struct spi_hid_device *shid_device;
 		struct hid_device *hid;
 
+		/* SPI HID VROM entry */
+		shid->shid_device[i].vrom_entry = &vrom_entry[i];
+		
+		vrom_entry[i].input = shid->inbuf;
+		vrom_entry[i].output = shid->outbuf;
+		vrom_entry[i].command = shid->cmdbuf;
+		vrom_entry[i].data = shid->argsbuf;
+		
+		/* SPI HID device */
 		shid->shid_device[i].parent = shid;
 		
 		shid->shid_device[i].report = shid_report[i];
