@@ -1332,7 +1332,6 @@ static int spi_hid_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, shid);
 
 	shid->spi = spi;
-
 	mutex_init(&shid->driver_lock);
 
 	init_waitqueue_head(&shid->wait);
@@ -1341,6 +1340,8 @@ static int spi_hid_probe(struct spi_device *spi)
 	/* we need to allocate the command buffer without knowing the maximum
 	 * size of the reports. Let's use SPI_HID_IOBUF_LENGTH, then we do the
 	 * real computation later. */
+	shid->bufsize = SPI_HID_IOBUF_LENGTH;
+		
 	ret = spi_hid_alloc_buffers(shid, SPI_HID_IOBUF_LENGTH);
 	if (ret < 0)
 		goto err;
@@ -1382,22 +1383,21 @@ static int spi_hid_probe(struct spi_device *spi)
 		/* SPI HID device */
 		shid_device->parent = shid;
 
-		shid_device->report = shid_report[i];
-		
+		shid_device->report = shid_report[i];		
+
+		ret = spi_hid_fetch_hid_descriptor(shid_device);
+		if (ret != 0) {
+			goto err_mem_free;
+		}
+
+		shid_device->hid = NULL;
 		hid = hid_allocate_device();
-		shid_device->hid = hid;
 		
 		if (IS_ERR(hid)) {
 			ret = PTR_ERR(hid);
 			goto err_mem_free;
 		}
 
-		ret = spi_hid_fetch_hid_descriptor(&shid->shid_device[i]);
-		if (ret != 0) {
-			goto err_mem_free;
-		}
-
-		shid_device = &shid->shid_device[i];
 		shid_device->hid = hid;
 		
 		hid->driver_data = shid_device;
