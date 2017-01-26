@@ -177,13 +177,13 @@ static DEFINE_MUTEX(spi_hid_open_mut);
 struct spi_hid_device {
 	void *parent;
 	
-	const struct spi_hid_report   *report;
 	struct hid_device	*hid;           /* pointer to corresponding HID dev */
+	const struct spi_hid_report   *report;  /* Report provided in RAM */
 
 	union {
-		__u8 hdesc_buffer[sizeof(struct spi_hid_desc)];
-		struct spi_hid_desc hdesc;	/* the HID Descriptor */
-		unsigned char iobuf[SPI_HID_IOBUF_LENGTH];
+		__u8                          hdesc_buffer[sizeof(struct spi_hid_desc)];     
+		struct spi_hid_desc           hdesc;                                         /* the HID Descriptor */
+		unsigned char                 iobuf[SPI_HID_IOBUF_LENGTH];
 	};
 };
 
@@ -233,32 +233,37 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
-		cmd->c.reg = 0x0;
+		length = sizeof(shid_device->report->data);
 	} else {
 		cmd->data[0] = shid_device->hdesc_buffer[registerIndex];
 		cmd->data[1] = shid_device->hdesc_buffer[registerIndex + 1];
+
+		if (length > 2) {
+			cmd->c.opcode = command->opcode;
+			cmd->c.reportTypeID = reportID | reportType << 4;
+
+			memcpy(cmd->data + length, args, args_len);
+
+			length += args_len;
+		}
 	}
 
-	if (length > 2) {
-		cmd->c.opcode = command->opcode;
-		cmd->c.reportTypeID = reportID | reportType << 4;
-	}
-
-	memcpy(cmd->data + length, args, args_len);
-	length += args_len;
-
-	mutex_unlock(&shid->driver_lock);
+ 	mutex_unlock(&shid->driver_lock);
 
 	spi_hid_dbg(shid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
 	
-	memset(&iobuf_tx, 0, iobuf_limit * sizeof(char));
-	memset(&iobuf_rx, 0, iobuf_limit * sizeof(char));
-
+	memset(iobuf_tx.tx_buf, 0, iobuf_limit * sizeof(char));
+	memset(iobuf_rx.rx_buf, 0, iobuf_limit * sizeof(char));
+	
 	/* prepare IO */
 	mutex_lock(&shid->driver_lock);
 
-	memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
-		
+	if (command == &hid_descr_cmd) {
+		memcpy(iobuf_tx.tx_buf, shid_device->report->data, length * sizeof(unsigned char));
+	} else {
+		memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
+	}
+	
 	set_bit(SPI_HID_READ_PENDING, &shid->flags);
 
 	if (wait)
@@ -285,23 +290,20 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		clear_bit(SPI_HID_READ_PENDING, &shid->flags);
 
 	mutex_unlock(&shid->driver_lock);
-
-	if (ret != 0)
-		return -EIO;
 	
 	if(data_len > 0){
 		memcpy(buf_recv, iobuf_rx.rx_buf, data_len * sizeof(char));
-
-		printk("HID rx data note:\n");
-
-		for(i = 0; i < iobuf_limit; i++){
-			printk("0x%x ", (unsigned char) iobuf_rx.rx_buf[i]);
-		}
-
-		printk("\n");
 	}
+
+	printk("HID rx data note:\n");
+
+	for(i = 0; i < data_len; i++){
+		printk("0x%x ", (unsigned char) iobuf_rx.rx_buf);
+	}
+
+	printk("\n");
 	
-	return ret;
+	return 0;
 }
 
 static int spi_hid_command(struct spi_hid_device *shid_device,
@@ -900,7 +902,7 @@ static int spi_hid_start(struct hid_device *hid)
 	struct spi_hid *shid = shid_device->parent;
 	int ret;
 	unsigned int bufsize;
-	unsigned int minbufsize = HID_MIN_BUFFER_SIZE;
+	unsigned int minbufsize = SPI_HID_IOBUF_LENGTH;
 
 	/* common propertis */
 	mutex_lock(&shid->driver_lock);
@@ -1119,9 +1121,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	mutex_init(&shid->reset_lock);
 
 	/* we need to allocate the command buffer without knowing the maximum
-	 * size of the reports. Let's use HID_MIN_BUFFER_SIZE, then we do the
+	 * size of the reports. Let's use SPI_HID_IOBUF_LENGTH, then we do the
 	 * real computation later. */
-	ret = spi_hid_alloc_buffers(shid, HID_MIN_BUFFER_SIZE);
+	ret = spi_hid_alloc_buffers(shid, SPI_HID_IOBUF_LENGTH);
 	if (ret < 0)
 		goto err;
 
@@ -1139,7 +1141,8 @@ static int spi_hid_probe(struct spi_device *spi)
 		shid->hid_device[i].parent = shid;
 		
 		shid->hid_device[i].report = shid_report[i];
-
+		memset(shid->hid_device[i].iobuf, 0, SPI_HID_IOBUF_LENGTH * sizeof(unsigned char));
+		
 		shid->hid_device[i].hid = NULL;
 		hid = hid_allocate_device();
 		
