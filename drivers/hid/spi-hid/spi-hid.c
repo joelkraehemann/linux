@@ -3,11 +3,16 @@
  *
  * Copyright (c) 2017 Joel Kraehemann <jkraehemann@gmail.com>
  *
- * This code is partly based on "HID over I2C protocol implementation":
+ *  This code is partly based on "HID over I2C protocol implementation":
  *
  *  Copyright (c) 2012 Benjamin Tissoires <benjamin.tissoires@gmail.com>
  *  Copyright (c) 2012 Ecole Nationale de l'Aviation Civile, France
  *  Copyright (c) 2012 Red Hat, Inc
+ *
+ *  This code is partly based on "HIDDEV":
+ * 
+ *  Copyright (c) 2001 Paul Stewart
+ *  Copyright (c) 2001 Vojtech Pavlik
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file COPYING in the main directory of this archive for
@@ -23,7 +28,6 @@
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/device.h>
-#include <linux/wait.h>
 #include <linux/err.h>
 #include <linux/string.h>
 #include <linux/list.h>
@@ -33,8 +37,15 @@
 #include <linux/mutex.h>
 #include <linux/acpi.h>
 #include <linux/of.h>
+#include <uapi/linux/hiddev.h>
 
-#define SPI_HID_IOBUF_LENGTH    1024
+#define spi_hid_dbg(shid, fmt, arg...)					\
+	do {								\
+		if (debug)						\
+			dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
+	} while (0)
+
+#define SPI_HID_IOBUF_LENGTH    2048
 
 /* flags */
 #define SPI_HID_STARTED		0
@@ -49,19 +60,20 @@ static bool debug;
 module_param(debug, bool, 0444);
 MODULE_PARM_DESC(debug, "print a lot of debug information");
 
-#define spi_hid_dbg(shid, fmt, arg...)					\
-	do {								\
-		if (debug)						\
-			dev_printk(KERN_DEBUG, &(shid)->spi->dev, fmt, ##arg); \
-	} while (0)
-
 enum{
 	SPI_HID_ACCELEROMETER,
 	SPI_HID_ACTUATOR,
 	SPI_HID_DEVICE_MANAGEMENT,
 	SPI_HID_KEYBOARD_BOOT,
 	SPI_HID_TRACKPAD_BOOT,
+	SPI_HID_LAST,
 } spi_hid_type;
+
+struct spi_hid_report {
+	u8 data[SPI_HID_IOBUF_LENGTH];
+
+	unsigned int length;
+};
 
 struct spi_hid_desc {
 	__le16 wHIDDescLength;
@@ -81,8 +93,6 @@ struct spi_hid_desc {
 } __packed;
 
 struct spi_hid_cmd {
-	unsigned int device_type;
-	
 	unsigned int registerIndex;
 	__u8 opcode;
 	unsigned int length;
@@ -128,13 +138,61 @@ static const struct spi_hid_cmd hid_no_cmd =		{ .length = 0 };
  * static const struct spi_hid_cmd hid_set_protocol_cmd = { SPI_HID_CMD(0x07) };
  */
 
+static const struct spi_hid_report accelerometer_report = {
+	.data = "\x06\x00\xff\x09\x03\xa1\x01\x06\x00\xff\x09\x03\x15\x00\x26\xff\x00\x85\xc0\x96\x6b\x00\x75\x08\x81\x02\xc0",
+	.length = 27,
+};
+
+static const struct spi_hid_report actuator_report = {
+	.data = "\x06\x00\xff\x09\x0d\xa1\x01\x06\x00\xff\x09\x0d\x15\x00\x26\xff\x00\x75\x08\x85\x3f\x96\x0f\x00\x81\x02\x09\x0d\x85\x53\x96\x3f\x00\x91\x02\xc0",
+	.length = 36,
+};
+
+static const struct spi_hid_report device_management_report = {
+	.data = "\x06\x00\xff\x09\x0b\xa1\x01\x06\x00\xff\x09\x0b\x15\x00\x26\xff\x00\x75\x08\x96\x04\x00\x85\xe0\x81\x22\xc0",
+	.length = 27,
+};
+
+static const struct spi_hid_report keyboard_boot_report = {
+	.data = "\x05\x01\x09\x06\xa1\x01\x85\x01\x05\x07\x19\xe0\x29\xe7\x15\x00\x25\x01\x75\x01\x95\x08\x81\x02\x95\x01\x75\x08\x81\x01\x95\x05\x75\x01\x05\x08\x19\x01\x29\x05\x91\x02\x95\x01\x75\x03\x91\x01\x95\x06\x75\x08\x15\x00\x26\xff\x00\x05\x07\x19\x00\x29\xff\x81\x00\x05\x0c\x75\x01\x95\x01\x09\xb8\x15\x00\x25\x01\x81\x02\x05\xff\x09\x03\x75\x07\x95\x01\x81\x02\xc0\x05\x0c\x09\x01\xa1\x01\x85\x52\x15\x00\x25\x01\x75\x01\x95\x01\x09\xcd\x81\x02\x09\xb3\x81\x02\x09\xb4\x81\x02\x09\xb5\x81\x02\x09\xb6\x81\x02\x81\x01\x81\x01\x81\x01\x85\x09\x15\x00\x25\x01\x75\x08\x95\x01\x06\x01\xff\x09\x0b\xb1\x02\x75\x08\x95\x02\xb1\x01\xc0\x06\x00\xff\x09\x06\xa1\x01\x06\x00\xff\x09\x06\x15\x00\x26\xff\x00\x75\x08\x95\x40\x85\x3f\x81\x22\xc0\x06\x00\xff\x09\x0f\xa1\x01\x06\x00\xff\x09\x0f\x15\x00\x26\xff\x00\x75\x08\x95\x0f\x85\xbf\x81\x02\xc0",
+	.length = 208,
+};
+
+static const struct spi_hid_report trackpad_boot_report = {
+	.data = "\x05\x01\x09\x02\xa1\x01\x09\x01\xa1\x00\x05\x09\x19\x01\x29\x03\x15\x00\x25\x01\x85\x02\x95\x03\x75\x01\x81\x02\x95\x01\x75\x05\x81\x01\x05\x01\x09\x30\x09\x31\x15\x81\x25\x7f\x75\x08\x95\x02\x81\x06\x95\x04\x75\x08\x81\x01\xc0\xc0\x05\x0d\x09\x05\xa1\x01\x06\x00\xff\x09\x0c\x15\x00\x26\xff\x00\x75\x08\x95\x10\x85\x3f\x81\x22\xc0\x06\x00\xff\x09\x0c\xa1\x01\x06\x00\xff\x09\x0c\x15\x00\x26\xff\x00\x85\x44\x75\x08\x96\x57\x05\x81\x00\xc0",
+	.length = 110,
+};
+
+static const struct spi_hid_report *shid_report[SPI_HID_LAST] = {
+	&accelerometer_report,
+	&actuator_report,
+	&device_management_report,
+	&keyboard_boot_report,
+	&trackpad_boot_report,
+};
+
 static DEFINE_MUTEX(spi_hid_open_mut);
+
+/* the HID device */
+struct spi_hid_device {
+	void *parent;
+	
+	struct spi_hid_report   *report;
+	struct hid_device	*hid;           /* pointer to corresponding HID dev */
+
+	union {
+		__u8 hdesc_buffer[sizeof(struct spi_hid_desc)];
+		struct spi_hid_desc hdesc;	/* the HID Descriptor */
+		unsigned char iobuf[SPI_HID_IOBUF_LENGTH];
+	};
+};
 
 /* The main device structure */
 struct spi_hid {
-	struct spi_device *spi;                                      /* SPI device */
+	struct spi_device *spi;                 /* SPI device */
 
-	struct hid_device	hid[sizeof(spi_hid_type)];           /* pointer to corresponding HID dev */
+	struct spi_hid_device   hid_device[SPI_HID_LAST];
+	struct mutex            hid_lock;       /* as you optained hid_lock you may read/write buffer */
 
 	unsigned int		bufsize;	/* spi buffer size */
 	char			*inbuf;		/* Input buffer */
@@ -144,27 +202,23 @@ struct spi_hid {
 
 	unsigned long		flags;		/* device flags */
 
-	wait_queue_head_t	wait;		/* For waiting the interrupt */
-	int                     irq;
-
-	bool			irq_wake_enabled;
 	struct mutex		reset_lock;
 };
 
-static int __spi_hid_command(struct spi_device *spi,
+static int __spi_hid_command(struct spi_hid_device *shid_device,
 			     const struct spi_hid_cmd *command, u8 reportID,
 			     u8 reportType, u8 *args, int args_len,
 			     unsigned char *buf_recv, int data_len)
 {
-	struct spi_hid *shid = spi_get_drvdata(spi);
-	union command *cmd = (union command *)shid->cmdbuf;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
+	union command *cmd = (union command *) shid->cmdbuf;
 	union _tx_rx_buf {
 		unsigned char tx_buf[command->length];
 		unsigned char rx_buf[data_len];
 		unsigned char hid_buf[SPI_HID_IOBUF_LENGTH];
 	}iobuf_tx, iobuf_rx;
 	unsigned int iobuf_limit = SPI_HID_IOBUF_LENGTH;
-	int num_xfers = 1;
 	int i = 0;
 	int ret;
 
@@ -174,10 +228,10 @@ static int __spi_hid_command(struct spi_device *spi,
 
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
-		cmd->c.reg = shid->wHIDDescRegister;
+		cmd->c.reg = 0x0;
 	} else {
-		cmd->data[0] = shid->hdesc_buffer[registerIndex];
-		cmd->data[1] = shid->hdesc_buffer[registerIndex + 1];
+		cmd->data[0] = shid_device->hdesc_buffer[registerIndex];
+		cmd->data[1] = shid_device->hdesc_buffer[registerIndex + 1];
 	}
 
 	if (length > 2) {
@@ -217,15 +271,6 @@ static int __spi_hid_command(struct spi_device *spi,
 	
 	if (ret != 0)
 		return -EIO;
-
-	if (wait) {
-		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
-		if (!wait_event_timeout(shid->wait,
-					!test_bit(SPI_HID_RESET_PENDING, &shid->flags),
-					msecs_to_jiffies(5000)))
-			ret = -ENODATA;
-		spi_hid_dbg(shid, "%s: finished.\n", __func__);
-	}
 	
 	if(data_len > 0){
 		memcpy(buf_recv, iobuf_rx.rx_buf, data_len * sizeof(char));
@@ -242,22 +287,22 @@ static int __spi_hid_command(struct spi_device *spi,
 	return ret;
 }
 
-static int spi_hid_command(struct spi_device *spi,
+static int spi_hid_command(struct spi_hid_device *shid_device,
 			   const struct spi_hid_cmd *command,
 			   unsigned char *buf_recv, int data_len)
 {
-	return __spi_hid_command(spi, command, 0, 0, NULL, 0,
+	return __spi_hid_command(shid_device, command, 0, 0, NULL, 0,
 				 buf_recv, data_len);
 }
 
-static int spi_hid_get_report(struct spi_device *spi, u8 reportType,
+static int spi_hid_get_report(struct spi_hid_device *shid_device, u8 reportType,
 			      u8 reportID, unsigned char *buf_recv, int data_len)
 {
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid *shid = shid_device->parent;
 	u8 args[3];
 	int ret;
 	int args_len = 0;
-	u16 readRegister = le16_to_cpu(shid->hdesc.wDataRegister);
+	u16 readRegister = le16_to_cpu(shid_device->hdesc.wDataRegister);
 
 	spi_hid_dbg(shid, "%s\n", __func__);
 
@@ -269,10 +314,10 @@ static int spi_hid_get_report(struct spi_device *spi, u8 reportType,
 	args[args_len++] = readRegister & 0xFF;
 	args[args_len++] = readRegister >> 8;
 
-	ret = __spi_hid_command(spi, &hid_get_report_cmd, reportID,
+	ret = __spi_hid_command(shid_device, &hid_get_report_cmd, reportID,
 				reportType, args, args_len, buf_recv, data_len);
 	if (ret) {
-		dev_err(&spi->dev,
+		dev_err(&shid->spi->dev,
 			"failed to retrieve report from device.\n");
 		return ret;
 	}
@@ -289,16 +334,16 @@ static int spi_hid_get_report(struct spi_device *spi, u8 reportType,
  * @len: size of buf
  * @use_data: true: use SET_REPORT HID command, false: send plain OUTPUT report
  */
-static int spi_hid_set_or_send_report(struct spi_device *spi, u8 reportType,
+static int spi_hid_set_or_send_report(struct spi_hid_device *shid_device, u8 reportType,
 				      u8 reportID, unsigned char *buf, size_t data_len, bool use_data)
 {
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid *shid = shid_device->parent;
 	u8 *args = shid->argsbuf;
 	const struct spi_hid_cmd *hidcmd;
 	int ret;
-	u16 dataRegister = le16_to_cpu(shid->hdesc.wDataRegister);
-	u16 outputRegister = le16_to_cpu(shid->hdesc.wOutputRegister);
-	u16 maxOutputLength = le16_to_cpu(shid->hdesc.wMaxOutputLength);
+	u16 dataRegister = le16_to_cpu(shid_device->hdesc.wDataRegister);
+	u16 outputRegister = le16_to_cpu(shid_device->hdesc.wOutputRegister);
+	u16 maxOutputLength = le16_to_cpu(shid_device->hdesc.wMaxOutputLength);
 	u16 size;
 	int args_len;
 	int index = 0;
@@ -308,7 +353,7 @@ static int spi_hid_set_or_send_report(struct spi_device *spi, u8 reportType,
 	if (data_len > shid->bufsize)
 		return -EINVAL;
 
-	size =		2			/* size */ +
+	size =		2		/* size */ +
 		(reportID ? 1 : 0)	/* reportID */ +
 		data_len		/* buf */;
 	args_len =	(reportID >= 0x0F ? 1 : 0) /* optional third byte */ +
@@ -345,10 +390,10 @@ static int spi_hid_set_or_send_report(struct spi_device *spi, u8 reportType,
 
 	memcpy(&args[index], buf, data_len);
 
-	ret = __spi_hid_command(spi, hidcmd, reportID,
+	ret = __spi_hid_command(shid_device, hidcmd, reportID,
 				reportType, args, args_len, NULL, 0);
 	if (ret) {
-		dev_err(&spi->dev, "failed to set a report to device.\n");
+		dev_err(&shid->spi->dev, "failed to set a report to device.\n");
 		return ret;
 	}
 
@@ -356,24 +401,25 @@ static int spi_hid_set_or_send_report(struct spi_device *spi, u8 reportType,
 }
 
 
-static int spi_hid_set_power(struct spi_device *spi, int power_state)
+static int spi_hid_set_power(struct spi_hid_device *shid_device, int power_state)
 {
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid *shid = shid_device->parent;
 	int ret;
 
 	spi_hid_dbg(shid, "%s\n", __func__);
 
-	ret = __spi_hid_command(spi, &hid_set_power_cmd, power_state,
+	ret = __spi_hid_command(shid_device, &hid_set_power_cmd, power_state,
 				0, NULL, 0, NULL, 0);
 	if (ret)
-		dev_err(&spi->dev, "failed to change power setting.\n");
+		dev_err(&shid->spi->dev, "failed to change power setting.\n");
 
 	return ret;
 }
 
-static int spi_hid_hwreset(struct spi_device *spi)
+static int spi_hid_hwreset(struct spi_hid_device *shid_device)
 {
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	int ret;
 
 	spi_hid_dbg(shid, "%s\n", __func__);
@@ -385,16 +431,16 @@ static int spi_hid_hwreset(struct spi_device *spi)
 	 */
 	mutex_lock(&shid->reset_lock);
 
-	ret = spi_hid_set_power(spi, SPI_HID_PWR_ON);
+	ret = spi_hid_set_power(shid_device, SPI_HID_PWR_ON);
 	if (ret)
 		goto out_unlock;
 
 	spi_hid_dbg(shid, "resetting...\n");
 
-	ret = spi_hid_command(spi, &hid_reset_cmd, NULL, 0);
+	ret = spi_hid_command(shid_device, &hid_reset_cmd, NULL, 0);
 	if (ret) {
 		dev_err(&spi->dev, "failed to reset device.\n");
-		spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
+		spi_hid_set_power(shid_device, SPI_HID_PWR_SLEEP);
 	}
 
  out_unlock:
@@ -402,10 +448,11 @@ static int spi_hid_hwreset(struct spi_device *spi)
 	return ret;
 }
 
-static void spi_hid_get_input(struct spi_hid *shid)
+static void spi_hid_get_input(struct spi_hid_device *shid_device)
 {
+	struct spi_hid *shid = shid_device->parent;
 	int ret, ret_size;
-	int size = le16_to_cpu(shid->hdesc.wMaxInputLength);
+	int size = le16_to_cpu(shid_device->hdesc.wMaxInputLength);
 
 	if (size > shid->bufsize)
 		size = shid->bufsize;
@@ -424,8 +471,7 @@ static void spi_hid_get_input(struct spi_hid *shid)
 
 	if (!ret_size) {
 		/* host or device initiated RESET completed */
-		if (test_and_clear_bit(SPI_HID_RESET_PENDING, &shid->flags))
-			wake_up(&shid->wait);
+		test_and_clear_bit(SPI_HID_RESET_PENDING, &shid->flags);
 		return;
 	}
 
@@ -438,22 +484,10 @@ static void spi_hid_get_input(struct spi_hid *shid)
 	spi_hid_dbg(shid, "input: %*ph\n", ret_size, shid->inbuf);
 
 	if (test_bit(SPI_HID_STARTED, &shid->flags))
-		hid_input_report(shid->hid, HID_INPUT_REPORT, shid->inbuf + 2,
+		hid_input_report(shid_device->hid, HID_INPUT_REPORT, shid->inbuf + 2,
 				 ret_size - 2, 1);
 
 	return;
-}
-
-static irqreturn_t spi_hid_irq(int irq, void *dev_id)
-{
-	struct spi_hid *shid = dev_id;
-
-	if (test_bit(SPI_HID_READ_PENDING, &shid->flags))
-		return IRQ_HANDLED;
-
-	spi_hid_get_input(shid);
-
-	return IRQ_HANDLED;
 }
 
 static int spi_hid_get_report_length(struct hid_report *report)
@@ -466,12 +500,13 @@ static void spi_hid_init_report(struct hid_report *report, u8 *buffer,
 				size_t bufsize)
 {
 	struct hid_device *hid = report->device;
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	unsigned int size, ret_size;
 
 	size = spi_hid_get_report_length(report);
-	if (spi_hid_get_report(spi,
+	if (spi_hid_get_report(shid_device,
 			       report->type == HID_FEATURE_REPORT ? 0x03 : 0x01,
 			       report->id, buffer, size))
 		return;
@@ -498,8 +533,9 @@ static void spi_hid_init_report(struct hid_report *report, u8 *buffer,
 static void spi_hid_init_reports(struct hid_device *hid)
 {
 	struct hid_report *report;
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	u8 *inbuf = kzalloc(shid->bufsize, GFP_KERNEL);
 
 	if (!inbuf) {
@@ -581,8 +617,9 @@ static int spi_hid_get_raw_report(struct hid_device *hid,
 				  unsigned char report_number, __u8 *buf, size_t count,
 				  unsigned char report_type)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	size_t ret_count, ask_count;
 	int ret;
 
@@ -592,7 +629,7 @@ static int spi_hid_get_raw_report(struct hid_device *hid,
 	/* +2 bytes to include the size of the reply in the query buffer */
 	ask_count = min(count + 2, (size_t)shid->bufsize);
 
-	ret = spi_hid_get_report(spi,
+	ret = spi_hid_get_report(shid_device,
 				 report_type == HID_FEATURE_REPORT ? 0x03 : 0x01,
 				 report_number, shid->rawbuf, ask_count);
 
@@ -616,8 +653,9 @@ static int spi_hid_get_raw_report(struct hid_device *hid,
 static int spi_hid_output_raw_report(struct hid_device *hid, __u8 *buf,
 				     size_t count, unsigned char report_type, bool use_data)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	int report_id = buf[0];
 	int ret;
 
@@ -631,7 +669,7 @@ static int spi_hid_output_raw_report(struct hid_device *hid, __u8 *buf,
 		count--;
 	}
 
-	ret = spi_hid_set_or_send_report(spi,
+	ret = spi_hid_set_or_send_report(shid_device,
 					 report_type == HID_FEATURE_REPORT ? 0x03 : 0x02,
 					 report_id, buf, count, use_data);
 
@@ -668,24 +706,25 @@ static int spi_hid_raw_request(struct hid_device *hid, unsigned char reportnum,
 
 static int spi_hid_parse(struct hid_device *hid)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
-	struct spi_hid_desc *hdesc = &shid->hdesc;
-	unsigned int rsize;
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid_desc *hdesc = &shid_device->hdesc;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
+	unsigned int rsize = 0;
 	char *rdesc;
 	int ret;
 	int tries = 3;
 
 	spi_hid_dbg(shid, "entering %s\n", __func__);
-
+	/*
 	rsize = le16_to_cpu(hdesc->wReportDescLength);
 	if (!rsize || rsize > HID_MAX_DESCRIPTOR_SIZE) {
 		dbg_hid("weird size of report descriptor (%u)\n", rsize);
 		return -EINVAL;
 	}
-
+	*/
 	do {
-		ret = spi_hid_hwreset(spi);
+		ret = spi_hid_hwreset(shid_device);
 		if (ret)
 			msleep(1000);
 	} while (tries-- > 0 && ret);
@@ -702,7 +741,7 @@ static int spi_hid_parse(struct hid_device *hid)
 
 	spi_hid_dbg(shid, "asking HID report descriptor\n");
 
-	ret = spi_hid_command(spi, &hid_report_descr_cmd, rdesc, rsize);
+	ret = spi_hid_command(shid_device, &hid_report_descr_cmd, rdesc, rsize);
 	if (ret) {
 		hid_err(hid, "reading report descriptor failed\n");
 		kfree(rdesc);
@@ -723,8 +762,8 @@ static int spi_hid_parse(struct hid_device *hid)
 
 static int spi_hid_start(struct hid_device *hid)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
 	int ret;
 	unsigned int bufsize = HID_MIN_BUFFER_SIZE;
 
@@ -754,8 +793,9 @@ static void spi_hid_stop(struct hid_device *hid)
 
 static int spi_hid_open(struct hid_device *hid)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	int ret = 0;
 
 	mutex_lock(&spi_hid_open_mut);
@@ -774,8 +814,9 @@ static int spi_hid_open(struct hid_device *hid)
 
 static void spi_hid_close(struct hid_device *hid)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 
 	/* protecting hid->open to make sure we don't restart
 	 * data acquistion due to a resumption we no longer
@@ -793,8 +834,9 @@ static void spi_hid_close(struct hid_device *hid)
 
 static int spi_hid_power(struct hid_device *hid, int lvl)
 {
-	struct spi_device *spi = hid->driver_data;
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid_device *shid_device = hid->driver_data;
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 
 	spi_hid_dbg(shid, "%s lvl:%d\n", __func__, lvl);
 
@@ -820,26 +862,22 @@ static struct hid_ll_driver spi_hid_ll_driver = {
 	.raw_request = spi_hid_raw_request,
 };
 
-static int spi_hid_init_irq(struct spi_device *spi)
+static int spi_hid_fetch_hid_descriptor(struct spi_hid_device *shid_device)
 {
-	struct spi_hid *shid = spi_get_drvdata(spi);
+	struct spi_hid *shid = shid_device->parent;
+	struct spi_device *spi = shid->spi;
 	int ret;
-
-	dev_dbg(&spi->dev, "Requesting IRQ: %d\n", shid->irq);
-
-	ret = request_threaded_irq(shid->irq, NULL, spi_hid_irq,
-				   IRQF_TRIGGER_LOW | IRQF_ONESHOT,
-				   spi->modalias, shid);
-	if (ret < 0) {
-		dev_warn(&spi->dev,
-			 "Could not register for %s interrupt, irq = %d,"
-			 " ret = %d\n",
-			 spi->modalias, shid->irq, ret);
-
-		return ret;
+	
+	/* spi hid fetch descriptor */
+	spi_hid_dbg(shid, "Fetching the HID descriptor\n");
+	ret = spi_hid_command(shid_device, &hid_descr_cmd, shid_device->hdesc_buffer,
+			      sizeof(struct spi_hid_desc));
+	if (ret) {
+		dev_err(&spi->dev, "hid_descr_cmd failed\n");
+		return -ENODEV;
 	}
 
-	return 0;
+	return(0);
 }
 
 #ifdef CONFIG_ACPI
@@ -869,28 +907,22 @@ static int spi_hid_probe(struct spi_device *spi)
 {
 	int ret;
 	struct spi_hid *shid;
-	struct hid_device *hid;
-	__u16 hidRegister;
 	int i;
 	
 	dbg_hid("HID probe called for spi 0x%02x\n", spi->chip_select);
-	
+
+	/*  */
 	shid = kzalloc(sizeof(struct spi_hid), GFP_KERNEL);
 	if (!shid)
 		return -ENOMEM;
-
-	if (spi->irq > 0) {
-		shid->irq = spi->irq;
-	}
-	
+		
 	spi_set_drvdata(spi, shid);
 
 	shid->spi = spi;
 
-	ihid->wHIDDescRegister = 0;
-
-	init_waitqueue_head(&shid->wait);
 	mutex_init(&shid->reset_lock);
+
+	mutex_init(&shid->hid_lock);
 
 	/* we need to allocate the command buffer without knowing the maximum
 	 * size of the reports. Let's use HID_MIN_BUFFER_SIZE, then we do the
@@ -904,37 +936,52 @@ static int spi_hid_probe(struct spi_device *spi)
 	pm_runtime_enable(&spi->dev);
 	device_enable_async_suspend(&spi->dev);
 
-	ret = spi_hid_init_irq(spi);
-	if (ret < 0)
-		goto err_pm;
+	ret = 0;
+	
+	for (i = 0; i < SPI_HID_LAST; i++) {
+		struct spi_hid_device *shid_device;
+		struct hid_device *hid;
 
-	for(i = 0; i < sizeof(spi_hid_type); i++){
+		shid->hid_device[i].parent = shid;
+		
+		shid->hid_device[i].report = shid_report[i];
+
+		shid->hid_device[i].hid = NULL;
 		hid = hid_allocate_device();
+		
 		if (IS_ERR(hid)) {
 			ret = PTR_ERR(hid);
-			goto err_irq;
+			goto err_mem_free;
 		}
 
-		shid->hid[i] = hid;
+		ret = spi_hid_fetch_hid_descriptor(&shid->hid_device[i]);
+		if (ret != 0) {
+			goto err_mem_free;
+		}
 
-		hid->driver_data = spi;
+		shid_device = &shid->hid_device[i];
+		shid_device->hid = hid;
+		
+		hid->driver_data = shid_device;
 		hid->ll_driver = &spi_hid_ll_driver;
 		hid->dev.parent = &spi->dev;
 		hid->bus = BUS_SPI;
-		hid->version = le16_to_cpu(shid->hdesc.bcdVersion);
-		hid->vendor = le16_to_cpu(shid->hdesc.wVendorID);
-		hid->product = le16_to_cpu(shid->hdesc.wProductID);
-	}
 
-	snprintf(hid->name, sizeof(hid->name), "%s %04hX:%04hX",
-		 spi->modalias, hid->vendor, hid->product);
-	strlcpy(hid->phys, dev_name(&spi->dev), sizeof(hid->phys));
+		hid->version = le16_to_cpu(shid_device->hdesc.bcdVersion);
+		hid->vendor = le16_to_cpu(shid_device->hdesc.wVendorID);
+		hid->product = le16_to_cpu(shid_device->hdesc.wProductID);
 
-	ret = hid_add_device(hid);
-	if (ret) {
-		if (ret != -ENODEV)
-			hid_err(spi, "can't add hid device: %d\n", ret);
-		goto err_mem_free;
+		snprintf(hid->name, sizeof(hid->name), "%s %04hX:%04hX",
+			 spi->modalias, hid->vendor, hid->product);
+		strlcpy(hid->phys, dev_name(&spi->dev), sizeof(hid->phys));
+
+		ret = hid_add_device(hid);
+		if (ret) {
+			if (ret != -ENODEV)
+				hid_err(spi, "can't add hid device: %d\n", ret);
+			goto err_mem_free;
+		}
+
 	}
 
 	ret = devm_add_action_or_reset(&spi->dev,
@@ -946,13 +993,16 @@ static int spi_hid_probe(struct spi_device *spi)
 	dev_info(&spi->dev, "registered HID SPI driver\n");
 	
 	pm_runtime_put(&spi->dev);
+	
 	return 0;
 
  err_mem_free:
-	hid_destroy_device(hid);
-
- err_irq:
-	free_irq(shid->irq, shid);
+	for (i = 0; i < SPI_HID_LAST; i++) {
+		if(shid->hid_device[i].hid != NULL)
+			hid_destroy_device(shid->hid_device[i].hid);
+		else
+			break;
+	}
 
  err_pm:
 	pm_runtime_put_noidle(&spi->dev);
@@ -967,18 +1017,22 @@ static int spi_hid_probe(struct spi_device *spi)
 static int spi_hid_remove(struct spi_device *spi)
 {
 	struct spi_hid *shid = spi_get_drvdata(spi);
-	struct hid_device *hid;
 
+	unsigned int i;
+		
 	pm_runtime_get_sync(&spi->dev);
 	pm_runtime_disable(&spi->dev);
 	pm_runtime_set_suspended(&spi->dev);
 	pm_runtime_put_noidle(&spi->dev);
 
-	hid = shid->hid;
-	hid_destroy_device(hid);
+	for (i = 0; i < SPI_HID_LAST; i++){
+		struct hid_device *hid;
 
-	free_irq(shid->irq, shid);
-
+		
+		hid = shid->hid_device[i].hid;
+		hid_destroy_device(hid);
+	}
+	
 	if (shid->bufsize)
 		spi_hid_free_buffers(shid);
 
@@ -990,9 +1044,11 @@ static int spi_hid_remove(struct spi_device *spi)
 static void spi_hid_shutdown(struct spi_device *spi)
 {
 	struct spi_hid *shid = spi_get_drvdata(spi);
+	unsigned int i;
 
-	spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
-	free_irq(spi->irq, shid);
+	for (i = 0; i < SPI_HID_LAST; i++){
+		spi_hid_set_power(&shid->hid_device[i], SPI_HID_PWR_SLEEP);
+	}
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -1000,38 +1056,34 @@ static int spi_hid_suspend(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 	struct spi_hid *shid = spi_get_drvdata(spi);
-	struct hid_device *hid = shid->hid;
+	unsigned int i;
 	int ret;
-	int wake_status;
 
-	if (hid->driver && hid->driver->suspend) {
-		/*
-		 * Wake up the device so that IO issues in
-		 * HID driver's suspend code can succeed.
-		 */
-		ret = pm_runtime_resume(dev);
-		if (ret < 0)
-			return ret;
+	for (i = 0; i < SPI_HID_LAST; i++){
+			struct hid_device *hid;
+			
+			hid = shid->hid_device[i].hid;
+			
+			if (hid->driver && hid->driver->suspend) {
+				/*
+				 * Wake up the device so that IO issues in
+				 * HID driver's suspend code can succeed.
+				 */
+				ret = pm_runtime_resume(dev);
+				if (ret < 0)
+					continue;
 
-		ret = hid->driver->suspend(hid, PMSG_SUSPEND);
-		if (ret < 0)
-			return ret;
+				ret = hid->driver->suspend(hid, PMSG_SUSPEND);
+				if (ret < 0)
+					continue;
+			}
 	}
 
 	if (!pm_runtime_suspended(dev)) {
-		/* Save some power */
-		spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
-
-		disable_irq(shid->irq);
-	}
-
-	if (device_may_wakeup(&spi->dev)) {
-		wake_status = enable_irq_wake(shid->irq);
-		if (!wake_status)
-			shid->irq_wake_enabled = true;
-		else
-			hid_warn(hid, "Failed to enable irq wake: %d\n",
-				 wake_status);
+		for (i = 0; i < SPI_HID_LAST; i++){
+			/* Save some power */
+			spi_hid_set_power(&shid->hid_device[i], SPI_HID_PWR_SLEEP);
+		}
 	}
 
 	return 0;
@@ -1042,31 +1094,27 @@ static int spi_hid_resume(struct device *dev)
 	int ret;
 	struct spi_device *spi = to_spi_device(dev);
 	struct spi_hid *shid = spi_get_drvdata(spi);
-	struct hid_device *hid = shid->hid;
-	int wake_status;
 
-	if (device_may_wakeup(&spi->dev) && shid->irq_wake_enabled) {
-		wake_status = disable_irq_wake(shid->irq);
-		if (!wake_status)
-			shid->irq_wake_enabled = false;
-		else
-			hid_warn(hid, "Failed to disable irq wake: %d\n",
-				 wake_status);
-	}
-
+	unsigned int i;
+	
 	/* We'll resume to full power */
 	pm_runtime_disable(dev);
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
 
-	enable_irq(shid->irq);
-	ret = spi_hid_hwreset(spi);
-	if (ret)
-		return ret;
+	for(i = 0; i < SPI_HID_LAST; i++){
+		struct hid_device *hid;
 
-	if (hid->driver && hid->driver->reset_resume) {
-		ret = hid->driver->reset_resume(hid);
-		return ret;
+		ret = spi_hid_hwreset(&shid->hid_device[i]);
+		if (ret)
+			continue;
+
+		hid = shid->hid_device[i].hid;
+		
+		if (hid->driver && hid->driver->reset_resume) {
+			ret = hid->driver->reset_resume(hid);
+			continue;
+		}
 	}
 
 	return 0;
@@ -1078,9 +1126,12 @@ static int spi_hid_runtime_suspend(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 	struct spi_hid *shid = spi_get_drvdata(spi);
-
-	spi_hid_set_power(spi, SPI_HID_PWR_SLEEP);
-	disable_irq(shid->irq);
+	unsigned int i;
+	
+	for (i = 0; i < SPI_HID_LAST; i++){
+		/* Save some power */
+		spi_hid_set_power(&shid->hid_device[i], SPI_HID_PWR_SLEEP);
+	}
 	return 0;
 }
 
@@ -1088,9 +1139,11 @@ static int spi_hid_runtime_resume(struct device *dev)
 {
 	struct spi_device *spi = to_spi_device(dev);
 	struct spi_hid *shid = spi_get_drvdata(spi);
-
-	enable_irq(shid->irq);
-	spi_hid_set_power(spi, SPI_HID_PWR_ON);
+	unsigned int i;
+	
+	for (i = 0; i < SPI_HID_LAST; i++){
+		spi_hid_set_power(&shid->hid_device[i], SPI_HID_PWR_ON);
+	}
 	return 0;
 }
 #endif
