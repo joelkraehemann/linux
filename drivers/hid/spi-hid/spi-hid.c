@@ -1184,8 +1184,9 @@ static int spi_hid_probe(struct spi_device *spi)
 	device_enable_async_suspend(&spi->dev);
 
 	/* initialize interrupt */
-	shid->irq = spi->irq;
-
+	spi->irq = 0x0e; //TODO:JK: might be we should detect the interrupt
+	shid->irq = spi->irq; 
+	
 	ret = spi_hid_init_irq(spi);
 	if (ret < 0)
 		goto err_pm;
