@@ -481,6 +481,13 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 						    &offset);
 
 		if (buf_recv != NULL) {
+			/* correct available data */
+			if (offset + data_len > SPI_HID_IOBUF_LENGTH) {
+				data_len = SPI_HID_IOBUF_LENGTH - offset;
+				buf_recv[1] = 0xff & (data_len);
+			}
+			
+			/* copy requested data */
 			if (data_len > 0) 
 				memcpy(buf_recv + 3, destbuf + offset, data_len * sizeof(unsigned char));
 		}
@@ -502,6 +509,12 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		destbuf = spi_hid_get_data_register (&spit_vrom, vrom_entry,
 						     dataRegister,
 						     &offset);
+
+		/* correct available data */
+		if (offset + data_len > SPI_HID_IOBUF_LENGTH) {
+			data_len = SPI_HID_IOBUF_LENGTH - offset;
+			buf_recv[1] = 0xff & (data_len);
+		}			
 		
 		/* check against output and data buffer in order to guess if it's virtual IO */
 		if (destbuf != NULL) {
@@ -819,9 +832,13 @@ static void spi_hid_get_input(struct spi_hid_device *shid_device)
 
 	if (!ret_size) {
 		/* host or device initiated RESET completed */
+		test_and_clear_bit(SPI_HID_RESET_PENDING, &shid->flags);
+		/* TODO:JK: no wait available */
+#if 0
 		if (test_and_clear_bit(SPI_HID_RESET_PENDING, &shid->flags)) {
 			wake_up(&shid->wait);
-		}
+	}
+#endif
 
 		return;
 	}
