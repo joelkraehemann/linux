@@ -420,19 +420,6 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 	//	printk("a - 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n", reportID, reportType, cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
-	if (buf_recv != NULL) {
-		buf_recv[0] = HID_ITEM_TAG_LONG;
-		buf_recv[1] = 0;
-
-		if (reportType == 0x01) {
-			buf_recv[2] = HID_MAIN_ITEM_TAG_INPUT;
-		} else if (reportType == 0x02) {
-			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
-		} else if (reportType == 0x03) {
-			buf_recv[2] = HID_MAIN_ITEM_TAG_FEATURE;
-		}
-	}
-	
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
 		__u8 *shid_desc;
@@ -444,8 +431,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		shid_desc = shid_device->hdesc_buffer;
 		
 		if (buf_recv != NULL) {
-			buf_recv[1] = data_len;
-			memcpy(buf_recv + 3, &shid_desc[registerIndex], data_len * sizeof(char));
+			memcpy(buf_recv, shid_desc, data_len * sizeof(char));
 		}
 		
 		mutex_unlock(&shid->driver_lock);
@@ -453,12 +439,28 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		return 0;
 	}
 
+	/*  */
 	cmd->data[0] = shid_device->hdesc_buffer[registerIndex];
 	cmd->data[1] = shid_device->hdesc_buffer[registerIndex + 1];
 	
 	if (length > 2) {
 		cmd->c.opcode = command->opcode;
 		cmd->c.reportTypeID = reportID | reportType << 4;
+	}
+	
+	if (buf_recv != NULL) {
+		buf_recv[0] = HID_ITEM_TAG_LONG;
+		buf_recv[1] = 0;
+
+		if (reportType == 0x01) {
+			buf_recv[2] = HID_MAIN_ITEM_TAG_INPUT;
+		} else if (reportType == 0x02) {
+			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
+		} else if (reportType == 0x03) {
+			buf_recv[2] = HID_MAIN_ITEM_TAG_FEATURE;
+		} else {
+			buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
+		}
 	}
 	
 	if (command->opcode == 0x01) {
@@ -496,15 +498,24 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		
 		/* check against output and data buffer in order to guess if it's virtual IO */
 		if (destbuf != NULL) {
-			destbuf[offset] = args[0];
+			destbuf[0] = HID_ITEM_TAG_LONG;
+			destbuf[1] = 0;
+
+			if (reportType == 0x01) {
+				destbuf[2] = HID_MAIN_ITEM_TAG_INPUT;
+			} else if (reportType == 0x02) {
+				destbuf[2] = HID_MAIN_ITEM_TAG_OUTPUT;
+			} else if (reportType == 0x03) {
+				destbuf[2] = HID_MAIN_ITEM_TAG_FEATURE;
+			}
+			
 			destbuf[offset + 1] = 0xff & length;
-			destbuf[offset + 2] = args[5];
 			
 			memcpy(destbuf + 3, args + 6, length * sizeof(unsigned char));
 		}
 		
 		if (buf_recv != NULL) {
-			buf_recv[1] = 0xff & shid_device->vrom_entry->report.length;
+			buf_recv[1] = 0xff & length;
 
 			memcpy(buf_recv + 3, args + 6, length * sizeof(unsigned char));
 		}
@@ -553,6 +564,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	} 
 	
 	/* event timeout */
+#if 0
 	if (wait) {
 		spi_hid_dbg(shid, "%s: waiting...\n", __func__);
 		if (!wait_event_timeout(shid->wait,
@@ -561,7 +573,8 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			ret = -ENODATA;
 		spi_hid_dbg(shid, "%s: finished.\n", __func__);
 	}
-	
+#endif
+
 	return 0;
 }
 
@@ -1450,7 +1463,7 @@ static int spi_hid_probe(struct spi_device *spi)
 		memcpy(&shid_device->hdesc, &shid_desc[i], sizeof(struct spi_hid_desc));
 		
 		shid_device->bufsize = SPI_HID_IOBUF_LENGTH;
-
+		
 		/* copy report to data register */
 		memcpy(vrom_entry->data, vrom_entry[i].report.data, vrom_entry[i].report.length);
 		
