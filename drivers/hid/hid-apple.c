@@ -565,9 +565,10 @@ static const struct hid_device_id apple_devices[] = {
 		.driver_data = APPLE_NUMLOCK_EMULATION | APPLE_HAS_FN },
 	{ HID_USB_DEVICE(USB_VENDOR_ID_APPLE, USB_DEVICE_ID_APPLE_GEYSER1_TP_ONLY),
 		.driver_data = APPLE_NUMLOCK_EMULATION | APPLE_HAS_FN },
+#if 0
 	{ HID_SPI_DEVICE(SPI_VENDOR_ID_APPLE, SPI_DEVICE_ID_APPLE_INTERNAL_KEYBOARD_2016_ISO),
 		.driver_data = APPLE_HAS_FN | APPLE_ISO_KEYBOARD },
-
+#endif
 	{ }
 };
 MODULE_DEVICE_TABLE(hid, apple_devices);
