@@ -416,7 +416,9 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	spi = shid->spi;
 	vrom_entry = shid_device->vrom_entry;
 
-	printk("a - 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n", reportID, reportType, cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+	spi_hid_dbg(shid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
+
+	//	printk("a - 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n", reportID, reportType, cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 	if (buf_recv != NULL) {
 		buf_recv[0] = HID_ITEM_TAG_LONG;
@@ -435,7 +437,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	if (command == &hid_descr_cmd) {
 		__u8 *shid_desc;
 
-		printk("b0 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+		//		printk("b0 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 		
 		cmd->c.reg = shid_device->wHIDDescRegister;
 
@@ -460,13 +462,11 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	}
 	
 	if (command->opcode == 0x01) {
-		printk("clr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
-
-		memcpy(shid_device->cmdbuf, cmd->data, args_len * sizeof(__u8));
+		//		printk("clr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 		/* TODO:JK: might be we should implement */
 	} else if (command->opcode == 0x02) {		
-		printk("b1 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+		//		printk("b1 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 		/* get report command */
 		if (buf_recv != NULL) {
@@ -489,7 +489,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		dataRegister = args[1] | (args[2] << 8);
 		length = args[3] | (args[4] << 8);
 		
-		printk("b2 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+		//		printk("b2 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 		destbuf = spi_hid_get_data_register (&spit_vrom, vrom_entry,
 						     dataRegister,
 						     &offset);
@@ -513,19 +513,15 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 		return(0);
 	} else if (command->opcode == 0x08) {
-		printk("pwr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
-
-		mutex_unlock(&shid->driver_lock);
+		//		printk("pwr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 		/* TODO:JK: might be we should implement */
 	}
 
-	printk("b4 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+	//	printk("b4 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
  	mutex_unlock(&shid->driver_lock);
 	
-	spi_hid_dbg(shid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
-
 	/* prepare IO */
 	memset(iobuf_tx.tx_buf, 0, iobuf_limit * sizeof(char));
 	memset(iobuf_rx.rx_buf, 0, iobuf_limit * sizeof(char));
@@ -545,9 +541,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		
 	/* notify pending */
  	if (buf_recv != NULL) {
-		buf_recv[0] = HID_ITEM_TAG_LONG;
 		buf_recv[1] = 0xff & data_len;
-		buf_recv[2] = HID_MAIN_ITEM_TAG_OUTPUT;
 	}
 	
 	if (data_len > 0) {
