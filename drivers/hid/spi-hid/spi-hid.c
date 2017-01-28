@@ -482,8 +482,15 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 		if (buf_recv != NULL) {
 			/* correct available data */
-			if (offset + data_len > SPI_HID_IOBUF_LENGTH) {
-				data_len = SPI_HID_IOBUF_LENGTH - offset;
+			if (offset + data_len > vrom_entry->report.length) {
+ 				if (offset > vrom_entry->report.length) {
+					data_len = 0;
+					
+					printk("spi_hid_hid_cmd:0x02: warn offset %d\n", offset);
+				} else {
+					data_len = vrom_entry->report.length - offset;
+				}
+
 				buf_recv[1] = 0xff & (data_len);
 			}
 			
@@ -509,13 +516,32 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		destbuf = spi_hid_get_data_register (&spit_vrom, vrom_entry,
 						     dataRegister,
 						     &offset);
+		if (destbuf >= vrom_entry->report.data &&
+		    destbuf + offset < vrom_entry->report.data) {
+			if (buf_recv != NULL) {
+				buf_recv[1] = 0x0;
+			}
 
+			mutex_unlock(&shid->driver_lock);
+
+			return -ENOMEM;
+		}
+		
 		/* correct available data */
 		if (offset + data_len > SPI_HID_IOBUF_LENGTH) {
-			data_len = SPI_HID_IOBUF_LENGTH - offset;
-			buf_recv[1] = 0xff & (data_len);
+			if (offset > SPI_HID_IOBUF_LENGTH) {
+				data_len = 0;
+				
+				printk("spi_hid_hid_cmd:0x03: warn offset %d\n", offset);
+			} else {
+				data_len = SPI_HID_IOBUF_LENGTH - offset;
+			}
+
+			if (buf_recv != NULL) {
+				buf_recv[1] = 0xff & (data_len);
+			}
 		}			
-		
+			
 		/* check against output and data buffer in order to guess if it's virtual IO */
 		if (destbuf != NULL) {
 			destbuf[offset] = HID_ITEM_TAG_LONG;
