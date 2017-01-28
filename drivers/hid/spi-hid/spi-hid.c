@@ -450,7 +450,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	
 	if (buf_recv != NULL) {
 		buf_recv[0] = HID_ITEM_TAG_LONG;
-		buf_recv[1] = 0;
+		buf_recv[1] = 0xff & data_len;
 
 		if (reportType == 0x01) {
 			buf_recv[2] = HID_MAIN_ITEM_TAG_INPUT;
@@ -468,14 +468,21 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 		/* TODO:JK: might be we should implement */
 	} else if (command->opcode == 0x02) {		
+		unsigned char *destbuf;
+		__le16 dataRegister;
+		__le16 offset;
 		//		printk("b1 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 		/* get report command */
-		if (buf_recv != NULL) {
-			buf_recv[1] = (0xff & vrom_entry->report.length);
+		dataRegister = args[1] | (args[2] << 8);
 
-			if ((0xff & buf_recv[1]) > 0) 
-				memcpy(buf_recv + 3, vrom_entry->report.data, (0xff & vrom_entry->report.length));
+		destbuf = spi_hid_get_data_register(&spit_vrom, vrom_entry,
+						    dataRegister,
+						    &offset);
+
+		if (buf_recv != NULL) {
+			if (data_len > 0) 
+				memcpy(buf_recv + 3, destbuf + offset, data_len * sizeof(unsigned char));
 		}
 		
 		mutex_unlock(&shid->driver_lock);
@@ -498,8 +505,8 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		
 		/* check against output and data buffer in order to guess if it's virtual IO */
 		if (destbuf != NULL) {
-			destbuf[0] = HID_ITEM_TAG_LONG;
-			destbuf[1] = 0;
+			destbuf[offset] = HID_ITEM_TAG_LONG;
+			destbuf[offset + 1] = 0xff & data_len;
 
 			if (reportType == 0x01) {
 				destbuf[2] = HID_MAIN_ITEM_TAG_INPUT;
@@ -507,17 +514,15 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 				destbuf[2] = HID_MAIN_ITEM_TAG_OUTPUT;
 			} else if (reportType == 0x03) {
 				destbuf[2] = HID_MAIN_ITEM_TAG_FEATURE;
+			} else {
+				destbuf[2] = HID_MAIN_ITEM_TAG_OUTPUT;
 			}
 			
-			destbuf[offset + 1] = 0xff & length;
-			
-			memcpy(destbuf + 3, args + 6, length * sizeof(unsigned char));
+			memcpy(destbuf + offset + 3, args + 6, data_len * sizeof(unsigned char));
 		}
 		
 		if (buf_recv != NULL) {
-			buf_recv[1] = 0xff & length;
-
-			memcpy(buf_recv + 3, args + 6, length * sizeof(unsigned char));
+			memcpy(buf_recv + 3, args + 6, data_len * sizeof(unsigned char));
 		}
 		
 		mutex_unlock(&shid->driver_lock);
@@ -551,10 +556,6 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 				  iobuf_rx.rx_buf, data_len);
 		
 	/* notify pending */
- 	if (buf_recv != NULL) {
-		buf_recv[1] = 0xff & data_len;
-	}
-	
 	if (data_len > 0) {
 		clear_bit(SPI_HID_READ_PENDING, &shid->flags); //TODO:JK: verify thread-safety
 			
