@@ -488,7 +488,6 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			mutex_unlock(&shid->driver_lock);
 
 			/* TODO:JK: might be we should implement */
-			break;
 		} else if (command->opcode == 0x02) {		
 			unsigned char *destbuf;
 			__le16 dataRegister;
@@ -606,8 +605,50 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			mutex_unlock(&shid->driver_lock);
 
 			/* TODO:JK: might be we should implement */
+		} else {
+			mutex_unlock(&shid->driver_lock);
+		}
+
+		if ( data_len + 3 < current_offset ) {
 			break;
 		}
+		
+		if ( data_len - current_offset >= SPI_HID_IOBUF_LENGTH - 3) {
+			current_data_len = SPI_HID_IOBUF_LENGTH - 3;
+
+			buf_recv[current_offset + 1] = 0xff & current_data_len;
+		} else {
+			current_data_len = data_len - current_offset;
+		}
+		
+		/* prepare IO */
+		memset(iobuf_tx.tx_buf, 0, iobuf_limit * sizeof(char));
+		memset(iobuf_rx.rx_buf, 0, iobuf_limit * sizeof(char));
+
+		/* perform SPIT Input/Output */
+		memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
+		memcpy(vrom_entry->input, iobuf_tx.tx_buf, length * sizeof(unsigned char));
+		
+		set_bit(SPI_HID_READ_PENDING, &shid->flags);
+
+		if (wait)
+			set_bit(SPI_HID_RESET_PENDING, &shid->flags);
+
+		ret = spi_write_then_read(spi,
+					  iobuf_tx.tx_buf, current_data_len,
+					  iobuf_rx.rx_buf, current_data_len);
+
+		//	print_hex_dump(KERN_DEBUG, "spi-hid:retval:", 0, 16, 16, , current_data_len, 1);
+		//	print_hex_dump(KERN_DEBUG, "spi-hid:retval:", 0, 16, 16, iobuf_rx.rx_buf, current_data_len, 1);
+		
+		/* notify pending */
+		if (current_data_len > 0) {
+			clear_bit(SPI_HID_READ_PENDING, &shid->flags); //TODO:JK: verify thread-safety
+			
+			if (buf_recv != NULL) {
+				memcpy(buf_recv + current_offset + 3, iobuf_rx.rx_buf, current_data_len * sizeof(char));
+			}
+		} 
 
 		/* do the magic iteration */
 		current_offset += 256;
@@ -615,41 +656,6 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 	//	printk("b4 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
-
-	if ( data_len >= SPI_HID_IOBUF_LENGTH - 3) {
-		data_len = SPI_HID_IOBUF_LENGTH - 3;
-
-		buf_recv[current_offset + 1] = 0xff & data_len;
-	}
-		
-	/* prepare IO */
-	memset(iobuf_tx.tx_buf, 0, iobuf_limit * sizeof(char));
-	memset(iobuf_rx.rx_buf, 0, iobuf_limit * sizeof(char));
-
-	/* perform SPIT Input/Output */
-	memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
-	memcpy(vrom_entry->input, iobuf_tx.tx_buf, length * sizeof(unsigned char));
-		
-	set_bit(SPI_HID_READ_PENDING, &shid->flags);
-
-	if (wait)
-		set_bit(SPI_HID_RESET_PENDING, &shid->flags);
-
-	ret = spi_write_then_read(spi,
-				  iobuf_tx.tx_buf, length,
-				  iobuf_rx.rx_buf, data_len);
-
-	//	print_hex_dump(KERN_DEBUG, "spi-hid:retval:", 0, 16, 16, , current_data_len, 1);
-	//	print_hex_dump(KERN_DEBUG, "spi-hid:retval:", 0, 16, 16, iobuf_rx.rx_buf, current_data_len, 1);
-		
-	/* notify pending */
-	if (current_data_len > 0) {
-		clear_bit(SPI_HID_READ_PENDING, &shid->flags); //TODO:JK: verify thread-safety
-			
-		if (buf_recv != NULL) {
-			memcpy(buf_recv + current_offset + 3, iobuf_rx.rx_buf, current_data_len * sizeof(char));
-		}
-	} 
 	
 	/* event timeout */
 #if 0
