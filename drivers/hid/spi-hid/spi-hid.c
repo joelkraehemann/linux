@@ -455,11 +455,11 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 	current_offset = 0;
 	
-	for (i = 0; i * 253 < data_len; i++) {
-		if (data_len - (i * 253) > 253 ) {
-			current_data_len = 253;
+	for (i = 0; i * 252 < data_len; i++) {
+		if (data_len - (i * 252) > 252 ) {
+			current_data_len = 252;
 		} else {
-			current_data_len = data_len - (i * 253);
+			current_data_len = data_len - (i * 252);
 		}
 	
 		mutex_lock(&shid->driver_lock);
@@ -664,7 +664,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		}
 #endif
 
-		current_offset += 253;
+		current_offset += 252;
 	}
 	
 	return 0;
