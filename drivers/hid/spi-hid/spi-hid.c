@@ -619,6 +619,8 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			buf_recv[current_offset + 1] = 0xff & current_data_len;
 		} else {
 			current_data_len = data_len - current_offset;
+
+			buf_recv[current_offset + 1] = 0xff & current_data_len;
 		}
 		
 		/* prepare IO */
