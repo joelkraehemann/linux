@@ -421,13 +421,13 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 	spi_hid_dbg(shid, "%s: cmd=%*ph\n", __func__, length, cmd->data);
 
-	//	printk("a - 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n", reportID, reportType, cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+	printk("a - 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n", reportID, reportType, cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 	/* special case for hid_descr_cmd */
 	if (command == &hid_descr_cmd) {
 		__u8 *shid_desc;
 
-		//		printk("b0 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+		printk("b0 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 		
 		cmd->c.reg = shid_device->wHIDDescRegister;
 
@@ -461,6 +461,8 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		} else {
 			current_data_len = data_len - (i * 252);
 		}
+
+		printk("pkg[%d] - %d\n", data_len, i);
 	
 		mutex_lock(&shid->driver_lock);
 		
@@ -480,14 +482,14 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		}
 	
 		if (command->opcode == 0x01) {
-			//		printk("clr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+			printk("clr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 			/* TODO:JK: might be we should implement */
 		} else if (command->opcode == 0x02) {		
 			unsigned char *destbuf;
 			__le16 dataRegister;
 			__le16 offset;
-			//		printk("b1 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+			printk("b1 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 			/* get report command */
 			dataRegister = args[1] | (args[2] << 8);
@@ -497,17 +499,6 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 							    &offset);
 
 			if (destbuf == NULL) {
-				if (buf_recv != NULL) {
-					buf_recv[current_offset + 1] = 0x0;
-				}
-			
-				mutex_unlock(&shid->driver_lock);
-			
-				return -EINVAL;
-			}
-
-			if (current_offset + offset > vrom_entry->report.length ||
-			    offset < 0) {
 				if (buf_recv != NULL) {
 					buf_recv[current_offset + 1] = 0x0;
 				}
@@ -543,7 +534,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			dataRegister = args[1] | (args[2] << 8);
 			length = args[3] | (args[4] << 8);
 		
-			//		printk("b2 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+			printk("b2 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 			destbuf = spi_hid_get_data_register (&spit_vrom, vrom_entry,
 							     dataRegister,
 							     &offset);
@@ -568,18 +559,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			
 				return -EINVAL;
 			}
-		
-			if (destbuf + current_offset >= vrom_entry->report.data &&
-			    destbuf + current_offset + offset < vrom_entry->report.data + vrom_entry->report.length) {
-				if (buf_recv != NULL) {
-					buf_recv[current_offset + 1] = 0x0;
-				}
 			
-				mutex_unlock(&shid->driver_lock);
-
-				return -EIO;
-			}
-		
 			/* correct available data */
 			if (current_offset + offset + current_data_len > SPI_HID_IOBUF_LENGTH) {
 				current_data_len = SPI_HID_IOBUF_LENGTH - (current_offset + offset);
@@ -617,7 +597,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 			return(0);
 		} else if (command->opcode == 0x08) {
-			//		printk("pwr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
+			printk("pwr - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 			/* TODO:JK: might be we should implement */
 		}
@@ -625,7 +605,15 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		//	printk("b4 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
 		mutex_unlock(&shid->driver_lock);
-	
+
+		if ( current_offset > SPI_HID_IOBUF_LENGTH) {
+			return -EINVAL;
+		}
+
+		if ( current_offset + current_data_len > SPI_HID_IOBUF_LENGTH) {
+			current_data_len = SPI_HID_IOBUF_LENGTH - current_offset;
+		}
+		
 		/* prepare IO */
 		memset(iobuf_tx.tx_buf, 0, iobuf_limit * sizeof(char));
 		memset(iobuf_rx.rx_buf, 0, iobuf_limit * sizeof(char));
@@ -664,7 +652,8 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		}
 #endif
 
-		current_offset += 252;
+		/* do the magic iteration */
+		current_offset += 256;
 	}
 	
 	return 0;
