@@ -480,17 +480,32 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 						    dataRegister,
 						    &offset);
 
+		if (destbuf == NULL) {
+			if (buf_recv != NULL) {
+				buf_recv[1] = 0x0;
+			}
+			
+			mutex_unlock(&shid->driver_lock);
+			
+			return -EINVAL;
+		}
+
+		if (offset > vrom_entry->report.length ||
+		    offset < 0) {
+			if (buf_recv != NULL) {
+				buf_recv[1] = 0x0;
+			}
+			
+			mutex_unlock(&shid->driver_lock);
+			
+			return -EINVAL;
+		}
+		
 		if (buf_recv != NULL) {
 			/* correct available data */
 			if (offset + data_len > vrom_entry->report.length) {
- 				if (offset > vrom_entry->report.length) {
-					data_len = 0;
-					
-					printk("spi_hid_hid_cmd:0x02: warn offset %d\n", offset);
-				} else {
-					data_len = vrom_entry->report.length - offset;
-				}
-
+				data_len = vrom_entry->report.length - offset;
+				
 				buf_recv[1] = 0xff & (data_len);
 			}
 			
@@ -516,30 +531,48 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		destbuf = spi_hid_get_data_register (&spit_vrom, vrom_entry,
 						     dataRegister,
 						     &offset);
-		if (destbuf >= vrom_entry->report.data &&
-		    destbuf + offset < vrom_entry->report.data) {
+
+		if (destbuf == NULL) {
 			if (buf_recv != NULL) {
 				buf_recv[1] = 0x0;
 			}
+			
+			mutex_unlock(&shid->driver_lock);
+			
+			return -EINVAL;
+		}
 
+		if (offset > SPI_HID_IOBUF_LENGTH ||
+		    offset < 0) {
+			if (buf_recv != NULL) {
+				buf_recv[1] = 0x0;
+			}
+			
+			mutex_unlock(&shid->driver_lock);
+			
+			return -EINVAL;
+		}
+		
+		if (destbuf >= vrom_entry->report.data &&
+		    destbuf + offset < vrom_entry->report.data + vrom_entry->report.length) {
+			if (buf_recv != NULL) {
+				buf_recv[1] = 0x0;
+			}
+			
 			mutex_unlock(&shid->driver_lock);
 
-			return -ENOMEM;
+			return -EIO;
 		}
 		
 		/* correct available data */
 		if (offset + data_len > SPI_HID_IOBUF_LENGTH) {
-			if (offset > SPI_HID_IOBUF_LENGTH) {
-				data_len = 0;
-				
-				printk("spi_hid_hid_cmd:0x03: warn offset %d\n", offset);
-			} else {
-				data_len = SPI_HID_IOBUF_LENGTH - offset;
-			}
+			data_len = SPI_HID_IOBUF_LENGTH - offset;
 
 			if (buf_recv != NULL) {
 				buf_recv[1] = 0xff & (data_len);
 			}
+
+			destbuf[offset + 1] = 0xff & 0;
 		}			
 			
 		/* check against output and data buffer in order to guess if it's virtual IO */
@@ -576,6 +609,14 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	//	printk("b4 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 
  	mutex_unlock(&shid->driver_lock);
+
+	if (data_len > SPI_HID_IOBUF_LENGTH) {
+		if (buf_recv != NULL) {
+			buf_recv[1] = 0x0;
+		}
+		
+		return -EIO;
+	}
 	
 	/* prepare IO */
 	memset(iobuf_tx.tx_buf, 0, iobuf_limit * sizeof(char));
