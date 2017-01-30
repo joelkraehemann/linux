@@ -346,8 +346,12 @@ struct spi_hid {
 };
 
 
-#if 0
-u8 usagePage, u8 usage,
+__le16 spi_hid_put_usage_page(unsigned char *outbuf,
+			      u8 usagePage)
+{
+	unsigned int offset;
+
+	offset = 0;
 	
 	/* usage page */
 	switch (usagePage) {
@@ -371,14 +375,71 @@ u8 usagePage, u8 usage,
 	case HID_UP_LOGIVENDOR3:
 	case HID_UP_LNVENDOR:
 	case HID_UP_SENSOR:
-		outbuf[offset++] = 0x05;
-		outbuf[offset++] = 0x01;
+		outbuf[offset++] = (HID_USAGE_PAGE & usagePage) >> 8;
 		break;
 	default:
+		spi_hid_dbg ("undefined usage page");
+		
 		outbuf[offset++] = 0x0;
-		outbuf[offset++] = 0x0;		
-	}	
-#endif
+	}
+
+	return offset;
+}
+
+__le16 spi_hid_put_usage(unsigned char *outbuf,
+			 u8 usage)
+{
+	unsigned int offset;
+
+	offset = 0;
+
+	/* usage */
+	switch (usage) {
+	case HID_GD_POINTER:
+	case HID_GD_MOUSE:
+	case HID_GD_JOYSTICK:
+	case HID_GD_GAMEPAD:
+	case HID_GD_KEYBOARD:
+	case HID_GD_KEYPAD:
+	case HID_GD_MULTIAXIS:
+	case HID_GD_X:
+	case HID_GD_Y:
+	case HID_GD_Z:
+	case HID_GD_RX:
+	case HID_GD_RY:
+	case HID_GD_RZ:
+	case HID_GD_SLIDER:
+	case HID_GD_DIAL:
+	case HID_GD_WHEEL:
+	case HID_GD_HATSWITCH:
+	case HID_GD_BUFFER:
+	case HID_GD_BYTECOUNT:
+	case HID_GD_MOTION:
+	case HID_GD_START:
+	case HID_GD_SELECT:
+	case HID_GD_VX:
+	case HID_GD_VY:
+	case HID_GD_VZ:
+	case HID_GD_VBRX:
+	case HID_GD_VBRY:
+	case HID_GD_VBRZ:
+	case HID_GD_VNO:
+	case HID_GD_FEATURE:
+	case HID_GD_SYSTEM_CONTROL:
+	case HID_GD_UP:
+	case HID_GD_DOWN:
+	case HID_GD_RIGHT:
+	case HID_GD_LEFT:
+		outbuf[offset++] = (HID_USAGE & usage);
+		break;
+	default:
+		spi_hid_dbg ("undefined usage");
+		
+		outbuf[offset++] = 0x0;
+	}
+
+	return offset;
+}
 
 __le16 spi_hid_start_collection(unsigned char *outbuf,
 				u8 collectionType)
@@ -393,10 +454,10 @@ __le16 spi_hid_start_collection(unsigned char *outbuf,
 	case HID_COLLECTION_APPLICATION:
 	case HID_COLLECTION_LOGICAL:
 		outbuf[offset++] = HID_MAIN_ITEM_TAG_BEGIN_COLLECTION | collectionType;
-		outbuf[offset++] = 0x01;
 		break;
 	default:
-		outbuf[offset++] = 0x0;
+		spi_hid_dbg ("invalid collection type");
+
 		outbuf[offset++] = 0x0;
 	}
 
@@ -469,7 +530,7 @@ __le16 spi_hid_put_long_item(unsigned char *outbuf,
 		outbuf[offset++] = itemType;
 		break;
 	default:
-		spi_hid_dbg ("put long item - invalid item type");
+		spi_hid_dbg ("invalid long item type");
 
 		outbuf[offset++] = 0x0;
 	}
@@ -490,7 +551,7 @@ __le16 spi_hid_put_main_item(unsigned char *outbuf,
 	if ((itemSize & (~0x03)) == 0) {
 		outbuf[offset++] = 0x80 | itemSize;
 	} else {
-		spi_hid_dbg ("put main item - invalid item size");
+		spi_hid_dbg ("invalid main item size");
 
 		outbuf[offset++] = 0x0;
 	}
@@ -508,7 +569,7 @@ __le16 spi_hid_put_main_item(unsigned char *outbuf,
 		outbuf[offset++] = itemTag;
 		break;
 	default:
-		spi_hid_dbg ("put main item - invalid item tag");
+		spi_hid_dbg ("invalid main item tag");
 
 		outbuf[offset++] = 0x0;
 	}
