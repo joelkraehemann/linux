@@ -345,6 +345,177 @@ struct spi_hid {
 	struct mutex		reset_lock;
 };
 
+
+#if 0
+u8 usagePage, u8 usage,
+	
+	/* usage page */
+	switch (usagePage) {
+	case HID_UP_GENDESK:
+	case HID_UP_SIMULATION:
+	case HID_UP_GENDEVCTRLS:
+	case HID_UP_KEYBOARD:
+	case HID_UP_LED:
+	case HID_UP_BUTTON:
+	case HID_UP_ORDINAL:
+	case HID_UP_TELEPHONY:
+	case HID_UP_CONSUMER:
+	case HID_UP_DIGITIZER:
+	case HID_UP_PID:
+	case HID_UP_HPVENDOR:
+	case HID_UP_HPVENDOR2:
+	case HID_UP_MSVENDOR:
+	case HID_UP_CUSTOM:
+	case HID_UP_LOGIVENDOR:
+	case HID_UP_LOGIVENDOR2:
+	case HID_UP_LOGIVENDOR3:
+	case HID_UP_LNVENDOR:
+	case HID_UP_SENSOR:
+		outbuf[offset++] = 0x05;
+		outbuf[offset++] = 0x01;
+		break;
+	default:
+		outbuf[offset++] = 0x0;
+		outbuf[offset++] = 0x0;		
+	}	
+#endif
+
+__le16 spi_hid_start_collection(unsigned char *outbuf,
+				u8 collectionType)
+{
+	unsigned int offset;
+
+	offset = 0;
+
+	/* collection type */
+	switch (collectionType) {
+	case HID_COLLECTION_PHYSICAL:
+	case HID_COLLECTION_APPLICATION:
+	case HID_COLLECTION_LOGICAL:
+		outbuf[offset++] = HID_MAIN_ITEM_TAG_BEGIN_COLLECTION | collectionType;
+		outbuf[offset++] = 0x01;
+		break;
+	default:
+		outbuf[offset++] = 0x0;
+		outbuf[offset++] = 0x0;
+	}
+
+	return offset;
+}
+
+__le16 spi_hid_end_collection(unsigned char *outbuf)
+{
+	*output = HID_MAIN_ITEM_TAG_END_COLLECTION;
+	return 1;
+}
+
+__le16 spi_hid_put_short_item(unsigned char *outbuf,
+			      unsigned char *inbuf,
+			      u8 itemSize, u8 itemType, u8 itemTag)
+{
+	unsigned int offset;
+
+	offset = 0;
+
+	/*
+	 * The first byte
+	 */
+	if ((itemSize & (~0x03)) == 0) {
+		outbuf[offset] = itemSize;
+	} else {
+		spi_hid_dbg ("invalid short item size");
+
+		outbuf[offset] = 0x0;
+	}
+
+	if ((itemType & (~0x0c)) == 0) {
+		outbuf[offset] |= itemType;
+	} else {
+		spi_hid_dbg ("invalid short item type");
+	}
+
+	if ((itemTag & (~0xf0)) == 0) {
+		outbuf[offset++] |= itemTag;
+	} else {
+		spi_hid_dbg ("invalid short item tag");
+
+		offset++;
+	}
+
+	/*
+	 * data bytes
+	 */
+	for (; offset < 4 && offset < itemSize + 1; offset++) {
+		outbuf[offset] = inbuf[offset - 1];
+	}
+	
+	return offset;
+}
+
+__le16 spi_hid_put_long_item(unsigned char *outbuf,
+			     unsigned char *inbuf,
+			     u8 length, u8 itemType)
+{
+	unsigned int offset;
+
+	offset = 0;
+	outbuf[offset++] = HID_ITEM_TAG_LONG;
+	outbuf[offset++] = length;
+
+	switch (itemType) {
+	case HID_INPUT_REPORT:
+	case HID_OUTPUT_REPORT:
+	case HID_FEATURE_REPORT:
+		outbuf[offset++] = itemType;
+		break;
+	default:
+		spi_hid_dbg ("put long item - invalid item type");
+
+		outbuf[offset++] = 0x0;
+	}
+
+	memcpy(outbuf + offset, inbuf, length * sizeof(unsigned char));
+	offset += length;
+	
+	return offset;
+}
+
+__le16 spi_hid_put_main_item(unsigned char *outbuf,
+			     u8 itemSize, u8 itemTag)
+{
+	unsigned int offset;
+
+	offset = 0;
+
+	if ((itemSize & (~0x03)) == 0) {
+		outbuf[offset++] = 0x80 | itemSize;
+	} else {
+		spi_hid_dbg ("put main item - invalid item size");
+
+		outbuf[offset++] = 0x0;
+	}
+	
+	switch (itemTag) {
+	case HID_MAIN_ITEM_CONSTANT:
+	case HID_MAIN_ITEM_VARIABLE:
+	case HID_MAIN_ITEM_RELATIVE:
+	case HID_MAIN_ITEM_WRAP:
+	case HID_MAIN_ITEM_NONLINEAR:
+	case HID_MAIN_ITEM_NO_PREFERRED:
+	case HID_MAIN_ITEM_NULL_STATE:
+	case HID_MAIN_ITEM_VOLATILE:
+	case HID_MAIN_ITEM_BUFFERED_BYTE:
+		outbuf[offset++] = itemTag;
+		break;
+	default:
+		spi_hid_dbg ("put main item - invalid item tag");
+
+		outbuf[offset++] = 0x0;
+	}
+
+	return offset;
+}			     
+
 unsigned char* spi_hid_get_data_register(struct spi_hid_vrom *vrom, struct spi_hid_vrom_entry *vrom_entry,
 					 __le16 registerAddress,
 					 __le16 *offset)
@@ -411,6 +582,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	int length = command->length;
 	__le16 report_len;		
 	bool wait = command->wait;
+	bool running;
 	bool do_report;
 	unsigned int registerIndex = command->registerIndex;
 	int i;
@@ -457,8 +629,10 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 	mutex_unlock(&shid->driver_lock);
 
 	current_offset = 0;
+	running = 1;
 	
-	for (i = 0; i * 252 < data_len; i++) {
+	for (i = 0; i * 252 < data_len ||
+		     running; i++) {
 		if (data_len - (i * 252) > 252 ) {
 			current_data_len = 252;
 		} else {
@@ -491,6 +665,10 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			mutex_unlock(&shid->driver_lock);
 
 			/* TODO:JK: might be we should implement */
+			current_offset += current_data_len;
+			running = 0;
+			
+			continue;
 		} else if (command->opcode == 0x02) {
 			unsigned char *destbuf;
 			__le16 dataRegister;
@@ -514,6 +692,10 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 				return -EINVAL;
 			}
 		
+			if (current_offset + offset + current_data_len >= vrom_entry->report.length) {
+				running = 0;
+			}
+			
 			if (buf_recv != NULL) {
 				/* correct available data */
 				if (current_offset + offset + current_data_len >= vrom_entry->report.length) {
@@ -524,7 +706,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			
 				/* copy requested data */
 				if (current_data_len > 0) 
-					memcpy(buf_recv + current_offset + 3, destbuf + current_offset + offset, current_data_len * sizeof(unsigned char));
+					memcpy(buf_recv + current_offset + 3, destbuf + offset + current_offset, current_data_len * sizeof(unsigned char));
 			}
 		
 			mutex_unlock(&shid->driver_lock);
@@ -573,10 +755,12 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 				current_data_len = SPI_HID_IOBUF_LENGTH - 4 - (current_offset + offset);
 
 				if (buf_recv != NULL) {
-					buf_recv[current_offset + 1] = 0xff & current_data_len;
+					buf_recv[current_offset + offset + 1] = 0xff & current_data_len;
 				}
 
 				destbuf[current_offset + offset + 1] = 0xff & current_data_len;
+
+				running = 0;
 			}			
 			
 			/* check against output and data buffer in order to guess if it's virtual IO */
@@ -598,7 +782,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			}
 		
 			if (buf_recv != NULL) {
-				memcpy(buf_recv + current_offset + 3, args + current_offset + 6, current_data_len * sizeof(unsigned char));
+				memcpy(buf_recv + current_offset + offset + 3, args + current_offset + 6, current_data_len * sizeof(unsigned char));
 			}
 		
 			mutex_unlock(&shid->driver_lock);
@@ -612,8 +796,14 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			mutex_unlock(&shid->driver_lock);
 
 			/* TODO:JK: might be we should implement */
+			current_offset += current_data_len;
+
+			running = 0;
+			
+			continue;
 		} else {
 			do_report = 1;
+			printk("IO - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
 			
 			mutex_unlock(&shid->driver_lock);
 		}
@@ -624,12 +814,21 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 		if ( data_len - current_offset >= SPI_HID_IOBUF_LENGTH - 4) {
 			current_data_len = SPI_HID_IOBUF_LENGTH - 4;
+			printk("IO - bug0\n");
 
-			buf_recv[current_offset + 1] = 0xff & current_data_len;
+			if (buf_recv != NULL)
+				buf_recv[current_offset + 1] = 0xff & current_data_len;
+
+			running = 0;
 		} else {
-			current_data_len = data_len - current_offset;
+			current_data_len = data_len - current_offset - 3;
+			
+			printk("IO - bug1\n");
 
-			buf_recv[current_offset + 1] = 0xff & current_data_len;
+			if (buf_recv != NULL)	
+				buf_recv[current_offset + 1] = 0xff & current_data_len;
+			
+			running = 0;
 		}
 		
 		/* prepare IO */
@@ -638,23 +837,17 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 
 		/* perform SPIT Input/Output */
 		if (do_report) {
-			if (buf_recv != NULL) {
-				buf_recv[current_offset + 1] = 0xff & (iobuf_limit);
+			printk("IO - bug2\n");
 				
-				memcpy(iobuf_tx.tx_buf, vrom_entry->report.data, (iobuf_limit) * sizeof(unsigned char));
-				//				print_hex_dump(KERN_DEBUG, "spi-hid:collection:", 0, 16, 16, vrom_entry->report.data, iobuf_limit, 1);
+			memcpy(iobuf_tx.tx_buf, vrom_entry->report.data, (vrom_entry->report.length) * sizeof(unsigned char));
+			//				print_hex_dump(KERN_DEBUG, "spi-hid:collection:", 0, 16, 16, vrom_entry->report.data, iobuf_limit, 1);
 
-				//				if (vrom_entry->report.length < current_data_len)
-					//					memcpy(buf_recv + current_offset + 3, vrom_entry->report.data, current_data_len * sizeof(char));
-			}
-			
+			//				if (vrom_entry->report.length < current_data_len)
+			//					memcpy(buf_recv + current_offset + 3, vrom_entry->report.data, current_data_len * sizeof(char));
 		} else {
-			report_len = current_data_len;
-			
-			memcpy(iobuf_tx.tx_buf, cmd->data, length * sizeof(unsigned char));
+			printk("IO - bug3\n");
+			report_len = current_data_len;			
 		}
-		
-		memcpy(vrom_entry->input, iobuf_tx.tx_buf, length * sizeof(unsigned char));
 		
 		set_bit(SPI_HID_READ_PENDING, &shid->flags);
 
@@ -669,32 +862,26 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 			//	print_hex_dump(KERN_DEBUG, "spi-hid:retval:", 0, 16, 16, iobuf_rx.rx_buf, current_data_len, 1);
 		
 			/* notify pending */
-			if (current_data_len > 0) {
-				clear_bit(SPI_HID_READ_PENDING, &shid->flags); //TODO:JK: verify thread-safety
+			clear_bit(SPI_HID_READ_PENDING, &shid->flags); //TODO:JK: verify thread-safety
+			printk("IO - bug4\n");
 			
-				if (buf_recv != NULL) {
-					buf_recv[current_offset + 1] = 0xff & (vrom_entry->report.length);
-
-					for (n = 0; n < vrom_entry->report.length; n++) {
-						iobuf_rx.rx_buf[n] = vrom_entry->report.data[n] ^ iobuf_rx.rx_buf[n];
-					}
-
-					print_hex_dump(KERN_DEBUG, "spi-hid:rx_buf:", 0, 16, 16, iobuf_rx.rx_buf, vrom_entry->report.length, 1);
-					
-					memcpy(buf_recv + current_offset + 3, iobuf_rx.rx_buf, (vrom_entry->report.length) * sizeof(char));
+			if (buf_recv != NULL) {
+				buf_recv[current_offset + 1] = 0xff & (vrom_entry->report.length);
+				
+				for (n = 0; n < vrom_entry->report.length; n++) {
+					iobuf_rx.rx_buf[n] = vrom_entry->report.data[n] ^ iobuf_rx.rx_buf[n];
 				}
 
-				/* do the magic iteration */
-				current_offset += (vrom_entry->report.length + 3);
-
-				continue;
-			} 
+				print_hex_dump(KERN_DEBUG, "spi-hid:rx_buf:", 0, 16, 16, iobuf_rx.rx_buf, vrom_entry->report.length, 1);
+				
+				memcpy(buf_recv + current_offset + 3, iobuf_rx.rx_buf, (vrom_entry->report.length) * sizeof(char));
+			}
 
 			/* do the magic iteration */
-			current_offset += iobuf_limit - 4;
-
+			current_offset += (vrom_entry->report.length + 3);
+			
 			continue;
-		}
+		} 
 		
 		/* buffer trailing empty space fix */
 		if (buf_recv != NULL &&
@@ -719,7 +906,7 @@ static int __spi_hid_command(struct spi_hid_device *shid_device,
 		}
 
 		/* do the magic iteration */
-		current_offset += 256;
+		current_offset += current_data_len;
 	}
 
 	//	printk("b4 - 0x%x 0x%x 0x%x 0x%x\n", cmd->data[0], cmd->data[1], cmd->data[2], cmd->data[3]);
